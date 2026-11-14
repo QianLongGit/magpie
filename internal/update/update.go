@@ -44,12 +44,16 @@ import (
 const Site = "https://usemagpie.ai"
 
 // Feed is where the newest release is described. MAGPIE_UPDATE_FEED points
-// it elsewhere, for testing an update against a local server.
+// it elsewhere, for testing an update against a local server. This fork
+// names no default: the official feed describes the official releases,
+// whose versions would take a fork build back onto them (a fork tag's
+// -fork.N is smaller than the official version it follows), so without the
+// env no feed is asked at all.
 func Feed() string {
 	if f := os.Getenv("MAGPIE_UPDATE_FEED"); f != "" {
 		return f
 	}
-	return siteFeed
+	return ""
 }
 
 // Release is one published version.
@@ -148,7 +152,11 @@ func LatestEvery(ctx context.Context, lang string) (*Release, error) {
 // when it is Stable's version (the site's Stable download). Only the site
 // knows it, so a failed feed is never answered from GitHub.
 func LatestStable(ctx context.Context) (*Release, error) {
-	u, err := url.Parse(Feed())
+	f := Feed()
+	if f == "" {
+		return nil, ErrNoFeed
+	}
+	u, err := url.Parse(f)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +192,15 @@ func latestAt(ctx context.Context, feed, lang string) (*Release, error) {
 	return rel, nil
 }
 
+// ErrNoFeed is what an update check answers when no feed is configured —
+// this fork without MAGPIE_UPDATE_FEED — before any request is made, so
+// neither the site nor GitHub behind it is asked.
+var ErrNoFeed = errors.New("no update feed is configured; set MAGPIE_UPDATE_FEED to serve this fork's updates")
+
 func latestFrom(ctx context.Context, feed, lang string) (*Release, error) {
+	if feed == "" {
+		return nil, ErrNoFeed
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", feed, nil)
 	if err != nil {
 		return nil, err
