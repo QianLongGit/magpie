@@ -228,6 +228,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 	was.ContextCap = 200000                           // its own route, POST /api/settings/context-cap
 	was.ContextCapAll = true                          // its own route, POST /api/settings/context-cap-mode
 	was.SearcherThen = []string{"fake/m1", "fake/m2"} // set in its own row
+	was.VisionRouteModel = "fake/m1"                  // set in its own row (vision routing)
 	was.RouterNote = "Los Angeles"                    // the Library's servers/hub-note
 	was.RouterAllTools = true                         // the Library's servers/hub-tools
 	was.BusyLoad = 150                                // the Routing page's busy-load

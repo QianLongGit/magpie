@@ -610,6 +610,15 @@ type Settings struct {
 	// fitted to the model's own levels when it is asked, or empty for
 	// magpie's choice, the least the model has (gateway.visionEffort).
 	VisionEffort string `json:"visionEffort,omitempty"`
+	// VisionRouteModel is the model a request whose latest user message
+	// carries an image is sent to instead, before the gateway routes it
+	// (the user's cc-switch fork's vision branch, built in): a model's id
+	// (provider/model, bare, group/<id>) written to the request as it is,
+	// or empty for no such routing. A request bound to a group
+	// (model "group/…") is left on it: the group is its only way out.
+	// History images don't route (only the latest user turn does), and it
+	// is Claude-side only: Responses input and Gemini contents never hit.
+	VisionRouteModel string `json:"visionRoute,omitempty"`
 	// ImageGen is the model magpie's generate_image tool draws with (the
 	// gateway's /v1/images/generations when a request names no model): a
 	// model's id, "off", or empty for one magpie picks (gateway.drawer).
