@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/lastgood"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -300,4 +302,65 @@ func ProjectSync(root, ref string) ProjectSyncState {
 		}
 	}
 	return ProjectSynced
+}
+
+// =====================================================================
+// 悬空级联：组删了/hidden/disabled，绑它的项目的 pin 指向死组——Claude
+// Code 会持续发 group/<dead-id> 全部失败，必须清。挂点 = provider 的组
+// 写入单点（store 成功后 fire GroupsChanged，覆盖 CLI/GUI/TUI 全部入口；
+// fork spec §4.1 的「挂 DAO 一处覆盖全部入口」同理）。davsync 按文件同
+// 步 providers.json 不 fire——兜底是 magpie projects 的 list 对账。
+// =====================================================================
+
+// init 把悬空清理挂到组变化订阅点上。
+func init() {
+	provider.GroupsChanged = append(provider.GroupsChanged, func() { DropGoneProjectBindings() })
+}
+
+// DropGoneProjectBindings 清理悬空绑定：组不在共享模型清单（hidden/
+// disabled/删除/auto-off 都不在）的绑定，先清 pin、成功后才删绑定行。
+// 次序红线：清 pin 失败（权限/IO）→ 留行、记日志、待下次 fire 或
+// magpie projects 对账重试——先删行 + 清 pin 失败 = 死 pin 永久残留且
+// 按行驱动的对账看不见。快照按双 map 裁决保留（删行保快照）。返回的
+// dropped 只含清理成功者。
+func DropGoneProjectBindings() (dropped []string) {
+	m, err := ProjectBindings()
+	if err != nil {
+		log.Printf("project bindings can't be read: %v (nothing dropped)", err)
+		return nil
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	models := sharedModels("claude")
+	served := func(ref string) bool {
+		for _, mo := range models {
+			if mo.ID == ref {
+				return true
+			}
+		}
+		return false
+	}
+	changed := false
+	keep := make(map[string]string, len(m))
+	for root, ref := range m {
+		if served(ref) {
+			keep[root] = ref
+			continue
+		}
+		if err := ClearProjectPins(root); err != nil {
+			log.Printf("clearing pins of %s: %v (kept for the next try)", root, err)
+			keep[root] = ref
+			continue
+		}
+		changed = true
+		dropped = append(dropped, root)
+	}
+	if !changed {
+		return nil
+	}
+	if err := SaveProjectBindings(keep); err != nil {
+		log.Printf("saving project bindings: %v", err)
+	}
+	return dropped
 }

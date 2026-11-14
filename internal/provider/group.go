@@ -35,6 +35,23 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
+// GroupsChanged is told whenever the set of routing groups changed — a
+// group saved, removed, hidden or switched off — by store, the one point
+// every write to providers.json goes through (the fork's cascade hung on
+// its DAO's delete_provider for the same reason: one write point covers
+// every entry, present and future). The subscriber is project routing
+// (internal/agent's project_route.go), which clears a bound project's
+// pins when the group they name is gone. A plain slice fired without
+// recover, like gateway.WhileServing.
+var GroupsChanged []func()
+
+// groupsChanged tells every subscriber the groups changed.
+func groupsChanged() {
+	for _, f := range GroupsChanged {
+		f()
+	}
+}
+
 // GroupPrefix starts a group's id in the catalog: "group/<id>".
 const GroupPrefix = "group/"
 

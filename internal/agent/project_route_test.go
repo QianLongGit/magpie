@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -620,5 +622,162 @@ func TestProjectRootNormalizesTheWindowsDriveLetter(t *testing.T) {
 	}
 	if got, want := normalizeVolume("/home/u/proj"), "/home/u/proj"; got != want {
 		t.Fatalf("normalizeVolume(linux path) = %q, want %q", got, want)
+	}
+}
+
+// =====================================================================
+// 组变化级联：provider 的组写入单点（store 成功后）fire GroupsChanged，
+// agent 侧 DropGoneProjectBindings 把悬空绑定清掉。次序红线：先清 pin
+// （幂等），成功后才删绑定行；清 pin 失败留行待下次重试。快照按双 map
+// 裁决保留（删行保快照）。
+// =====================================================================
+
+// realGroupProject 沙箱里造「真组 + 项目绑定 + pin 文件」的完整状态，
+// 返回项目根。成员挂在哑 chat 端点的 provider 上（never dialed）。
+func realGroupProject(t *testing.T, id string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if err := provider.Save(provider.Provider{ID: "a", Name: "a", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SaveGroup(provider.Group{ID: id, Name: id, Members: []string{"a/m"}}); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectPins(root, "group/"+id); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// goneAsserts 断言 root 的绑定行已删、快照保留、pin 键全无而用户键原样。
+func goneAsserts(t *testing.T, root string) {
+	t.Helper()
+	f := readProjectsTable(t)
+	if _, ok := f.Bindings[root]; ok {
+		t.Fatalf("binding row for %s still there after its group is gone", root)
+	}
+	if f.Snapshots[root] == "" {
+		t.Fatalf("snapshot of %s went with the row; the dual-map ruling keeps it", root)
+	}
+	env := readLocalEnv(t, root)
+	for _, k := range append(append([]string{}, wantPinEnv...), claudeContextEnv) {
+		if _, ok := env[k]; ok {
+			t.Fatalf("env.%s survived the cascade", k)
+		}
+	}
+	if env["ANTHROPIC_API_KEY"] != "user-key" {
+		t.Fatalf("user's own env key lost in the cascade: %v", env)
+	}
+}
+
+// TestGoneDeletingAGroupDropsItsProjectBindings: 自建组真删 → 级联删行、
+// 清 pin、保快照（用户其他键原样）。
+func TestGoneDeletingAGroupDropsItsProjectBindings(t *testing.T) {
+	root := realGroupProject(t, "proj-x")
+	if err := edit.SetJSON(localSettingsPath(root), edit.KV{Path: "env.ANTHROPIC_API_KEY", Value: "user-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.DeleteGroup("proj-x"); err != nil {
+		t.Fatal(err)
+	}
+	goneAsserts(t, root)
+}
+
+// TestGoneHidingAGroupDoesTheSame: 找到的组（auto）rm 后是 hidden 而非
+// 真删——同样悬空、同样级联（SaveGroup 会剥 Hidden，隐藏走 DeleteGroup
+// 于 found 组的路径，照 groupfound_test 的造法：两 provider 同名模型）。
+func TestGoneHidingAGroupDoesTheSame(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	for _, id := range []string{"a", "b"} {
+		if err := provider.Save(provider.Provider{ID: id, Name: id, Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"m"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ref := ""
+	for _, g := range provider.Groups() {
+		if g.ID == "auto-m" && !g.Hidden {
+			ref = g.Ref()
+		}
+	}
+	if ref == "" {
+		t.Fatal("no found group auto-m to bind to")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectPins(root, ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetJSON(localSettingsPath(root), edit.KV{Path: "env.ANTHROPIC_API_KEY", Value: "user-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.DeleteGroup("auto-m"); err != nil {
+		t.Fatal(err)
+	}
+	goneAsserts(t, root)
+}
+
+// TestGoneALiveGroupsBindingStays: 组还在（清单可服务）→ 不动。同时是计
+// 划风险#1 的探针：sharedModels("claude") 必须列出真组（按 ID==ref），
+// 否则活组绑定会被误清。
+func TestGoneALiveGroupsBindingStays(t *testing.T) {
+	root := realGroupProject(t, "proj-live")
+	if dropped := DropGoneProjectBindings(); len(dropped) != 0 {
+		t.Fatalf("a live group's binding dropped: %v", dropped)
+	}
+	if got := readProjectsTable(t).Bindings[root]; got != "group/proj-live" {
+		t.Fatalf("live binding = %q, want group/proj-live", got)
+	}
+	if s := ProjectSync(root, "group/proj-live"); s != ProjectSynced {
+		t.Fatalf("live project pins = %v, want ProjectSynced", s)
+	}
+}
+
+// TestGoneAFailedPinClearKeepsTheBinding: 清 pin 失败（写保护）→ 行留、
+// dropped 空；恢复后重跑 → 行删、pin 净（次序红线：先清 pin 后删行）。
+func TestGoneAFailedPinClearKeepsTheBinding(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0500 is not a write block on Windows")
+	}
+	root := realGroupProject(t, "proj-f")
+	dir := filepath.Join(root, ".claude")
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o0500); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.DeleteGroup("proj-f"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readProjectsTable(t).Bindings[root]; !ok {
+		t.Fatal("a failed pin clear dropped the row: dead pins would stay forever, unseen by the row-driven reconcile")
+	}
+	if dropped := DropGoneProjectBindings(); len(dropped) != 0 {
+		t.Fatalf("dropped %v against a write-protected project", dropped)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if dropped := DropGoneProjectBindings(); len(dropped) != 1 || dropped[0] != root {
+		t.Fatalf("retry dropped %v, want [%s]", dropped, root)
+	}
+	if _, ok := readProjectsTable(t).Bindings[root]; ok {
+		t.Fatal("row still there after a clean retry")
+	}
+	env := readLocalEnv(t, root)
+	for _, k := range append(append([]string{}, wantPinEnv...), claudeContextEnv) {
+		if _, ok := env[k]; ok {
+			t.Fatalf("env.%s survived the retry", k)
+		}
 	}
 }

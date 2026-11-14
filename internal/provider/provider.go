@@ -941,6 +941,9 @@ func store(f file) error {
 	catalog.Touched()
 	// and a request waiting to ask a provider again asks it as saved now
 	editedNow()
+	// the groups may have changed too: project routing clears a bound
+	// project's pins for a group that is gone (GroupsChanged)
+	groupsChanged()
 	return nil
 }
 
