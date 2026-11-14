@@ -2134,6 +2134,16 @@ ellipsis and full hover title; the existing narrow-web layout is unchanged.
 Chromium and WebKit, with the API faked.
 Set `ARTIFACT_DIR` to retain screenshots of the help.
 
+`vision-route-row.test.cjs` checks Settings › Models › Images' "Vision route"
+row (the cc-switch fork's vision routing, built in): the row names where a
+request whose latest message carries an image is sent to instead, empty
+shows Off; its picker offers Off first and each model marked to see images
+(Image recognition's list); a pick is saved as `visionRoute:
+"<provider>/<model>"` and shown as "Name · Provider"; Off clears it; a value
+written by hand in settings.json that the list doesn't have (a group id)
+shows as is, and another row's save keeps it (prefsKeep). All five
+languages, Chromium and WebKit, the narrow width in English.
+
 `provider-file-error.test.cjs` checks a providers.json that is there but
 can't be read (#415's review): the Providers page says over the list that the
 file can't be read (无法读取供应商配置文件), was left unchanged and is to be

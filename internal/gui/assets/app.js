@@ -21649,8 +21649,15 @@ function renderImages(s, keep) {
     "the least it has", (e) => savePrefs({ ...keep, visionEffort: e }));
   r.append(who, val);
   box.append(r);
-  renderImageGen(s, keep, box);
-  mcpRows(s, box);
+  // the rows after this one (Image generation and its waits, the fork's
+  // Vision route) live in imagerows.js; the MCP rows after them go with
+  // them so the order stays as drawn. The first draw waits for the module
+  // and redraws are synchronous (as videogen's row): a redraw that left
+  // the rows for the import's callback would move the page under the
+  // pointer (settings-hints' hover card)
+  const imageRows = () => { window.renderImageGen(s, keep, box); window.renderVisionRoute(s, keep, box); mcpRows(s, box); };
+  if (window.renderImageGen) imageRows();
+  else import("./imagerows.js").then(imageRows, statusErr);
 }
 
 // libWay: a row's way to give agents magpie's own server name in the
@@ -21682,72 +21689,7 @@ function libWay(name, label, cls) {
   return [line];
 }
 
-// renderImageGen: the model magpie's generate_image tool draws with — the
-// one magpie picks, one named, or none — and where agents are given the tool.
-function renderImageGen(s, keep, box) {
-  const models = s.imageGenModels || [];
-  const named = namedIn(models);
-  const icOf = (id) => models.find((x) => x.id === id)?.icon;
-  const v = s.imageGen || "";
-  // a pick that stands for a listed model shows as it, and is kept as saved
-  // until another is picked: a ChatGPT account's gpt-image-2.5 is its one
-  // GPT Image, as the backend draws the same for any name (#1865)
-  const shown = s.imageGenShown || v;
-  // a picked model magpie can't find any more is said, as Image recognition's
-  const gone = v && v === s.imageGenMissing;
-  const r = el("div", "row pref");
-  r.id = "imageGenRow";
-  const who = el("div", "who");
-  // the Library gives agents the tool, and can be off (#2091, nailuoGG)
-  const libOff = featuresOff.has("library");
-  const sub = el("div", "sub wraps",
-    v === "off" ? t("Agents given Magpie Image can't generate images or videos: the tool says it is off")
-    : gatewayMode ? t("The model the Image generation MCP server below draws with, for the agents that add it; images come back in their answer")
-    : libOff ? t("The model Magpie Image draws with. Agents get the Magpie Image tool from the Library, which is turned off in Plugins › Built-in; images are saved in their project")
-    : t("The model Magpie Image draws with. Agents get the Magpie Image tool from the Library; images are saved in their project"));
-  who.append(el("div", "name", t("Image generation")), sub);
-  if (v !== "off") who.append(...libWay("magpie-image", t("Give agents Magpie Image…"), "image-gen-tool"));
-  // ChatGPT's images backend picks the model itself, so its one entry says
-  // so where it draws, picked or automatic (#1865)
-  const draws = v === "off" || gone ? "" : v ? shown : s.imageGenAuto;
-  if (models.find((x) => x.id === draws)?.vendorPicks) who.append(el("div", "sub image-gen-vendor", t("ChatGPT's image backend picks the GPT Image version itself and doesn't say which; to choose one, use an OpenAI API key")));
-  // a pick unticked in its provider's editor since still draws, and says so
-  if (s.imageGenHidden && !gone && v !== "off") who.append(el("div", "sub image-gen-hidden", t("{model}, picked here, is unticked in its provider's Image models: it still draws, but leaves this list once another is picked. Tick it there to keep it listed.", { model: named(shown) })));
-  if (gone) who.append(el("div", "sub err image-gen-missing", s.imageGenAuto
-    ? t("{model}, picked here, isn't set up any more: its provider was removed or turned off, or no longer has it. {auto}, the automatic choice, draws in its place. Pick another model here.", { model: v, auto: named(s.imageGenAuto) })
-    : t("{model}, picked here, isn't set up any more: its provider was removed or turned off, or no longer has it. No other model draws, so a request that names no model is turned away. Pick another model here.", { model: v })));
-  const b = el("button", "rt-cond on");
-  if (v === "off") b.append(el("span", "", t("Off")));
-  else if (gone) b.append(icon("generic"), el("span", "", v + " · " + t("missing")));
-  else if (v) b.append(icon(icOf(shown) || "generic"), el("span", "", named(shown)));
-  else {
-    if (s.imageGenAuto) b.append(icon(icOf(s.imageGenAuto) || "generic"));
-    b.append(el("span", "", s.imageGenAuto ? t("Automatic") + " · " + named(s.imageGenAuto) : t("Automatic") + " · " + t("no model that draws")));
-  }
-  // a routing group (no provider of its own) goes with the others, as in
-  // an agent's picker, not in a group of its own with its own rail button
-  const opt = (x) => ({ value: x.id, label: x.name || x.id, note: x.vendorPicks ? x.providerName + " · " + t("ChatGPT picks the model") : x.providerName, icon: x.icon, group: x.provider ? x.providerName : ROUTING_GROUPS, ref: x.id });
-  b.onclick = (ev) => openPicker({ id: "", name: "", fields: [] }, { key: "imageGen", label: "model", value: shown, options: [
-    { value: "", label: t("Automatic"), note: s.imageGenAuto ? named(s.imageGenAuto) : t("no model that draws"), reset: true },
-    { value: "off", label: t("Off"), note: t("no images generated"), reset: true },
-    ...models.map(opt)],
-  onPick: (id) => { if (id !== shown) savePrefs({ ...keep, imageGen: id }); } }, b, ev);
-  const val = el("div", "val");
-  val.append(b);
-  r.append(who, val);
-  box.append(r);
-  // Video generation's row (#1399), drawn by videogen.js
-  if (v !== "off") {
-    const vr = el("div", "row pref");
-    box.append(vr);
-    if (window.videoGenFill) videoGenFill(vr, s, keep);
-    else { vr.hidden = true; import("./videogen.js").then(() => videoGenFill(vr, s, keep), () => {}); }
-  }
-  // how long a vendor is given to draw an image and send it: 5 minutes
-  // unless set, as a slow image endpoint needs more (neighbads on X)
-  box.append(waitRow("imageTimeoutRow", t("Image generation timeout"), t("How long a provider is given to draw an image and send it, before the request is given up. A slow image endpoint may need longer"),
-    [5, 10, 15, 30, 60], s.imageTimeout > 0 ? s.imageTimeout : 5, "{n} min", (n) => savePrefs({ ...keep, imageTimeout: n })));
-}
+
 
 // segRow: a Settings row, its name and sub, and segs of items at cur
 function segRow(id, name, sub, items, cur, pick, cls = "sub wraps") {
@@ -22867,7 +22809,7 @@ function prefsKeep(s) {
     codexWarmAts: warmTimes(s.codexWarmAts, s.codexWarmAt), claudeWarmAts: warmTimes(s.claudeWarmAts, s.claudeWarmAt), workbuddyCheckin: !!s.workbuddyCheckin, traeCheckin: !!s.traeCheckin, minimaxCheckin: !!s.minimaxCheckin, qoderCheckin: !!s.qoderCheckin, checkinAt: s.checkinAt || "", noStats: !!s.noStats, noUsageStats: !!s.noUsageStats, signInLinkOnly: !!s.signInLinkOnly,
     replyModel: s.replyModel || "", noLoopGuard: !!s.noLoopGuard, claudeLeanPrompt: !!s.claudeLeanPrompt, claudeNoExtraUsage: !!s.claudeNoExtraUsage, claudePrintMode: !!s.claudePrintMode, refusalRetries: s.refusalRetries ?? null, retryAfterCap: s.retryAfterCap ?? null,
     noUpdatePill: !!s.noUpdatePill, noAutoUpdate: !!s.noAutoUpdate, updateEvery: s.updateEvery || 360, autoRestart: !!s.autoRestart, noAutoDownload: !!s.noAutoDownload, updateChannel: s.updateChannel || "",
-    trayUsage: s.trayUsage || "", trayUsageEvery: s.trayUsageEvery || 3, trayNoLogos: !!s.trayNoLogos, trayNoBird: !!s.trayNoBird, trayNoNumber: !!s.trayNoNumber, trayPace: !!s.trayPace, trayNoCost: !!s.trayNoCost, trayWindows: s.trayWindows || {}, vision: s.vision || "", visionEffort: s.visionEffort || "", searcherEffort: s.searcherEffort || "", imageGen: s.imageGen || "", videoGen: s.videoGen || "", imageTimeout: s.imageTimeout || 0, classifyTimeout: s.classifyTimeout || 0, searcher: s.searcher || "", searchFirst: s.searchFirst || "", currency: s.currency || "usd", totalCurrency: s.totalCurrency || "", trayCurrency: s.trayCurrency || "",
+    trayUsage: s.trayUsage || "", trayUsageEvery: s.trayUsageEvery || 3, trayNoLogos: !!s.trayNoLogos, trayNoBird: !!s.trayNoBird, trayNoNumber: !!s.trayNoNumber, trayPace: !!s.trayPace, trayNoCost: !!s.trayNoCost, trayWindows: s.trayWindows || {}, vision: s.vision || "", visionEffort: s.visionEffort || "", visionRoute: s.visionRoute || "", searcherEffort: s.searcherEffort || "", imageGen: s.imageGen || "", videoGen: s.videoGen || "", imageTimeout: s.imageTimeout || 0, classifyTimeout: s.classifyTimeout || 0, searcher: s.searcher || "", searchFirst: s.searchFirst || "", currency: s.currency || "usd", totalCurrency: s.totalCurrency || "", trayCurrency: s.trayCurrency || "",
     chineseUnits: !!s.chineseUnits, dayStart: s.dayStart || 0, usageAlert: s.usageAlert || 0, balanceAlert: s.balanceAlert || 0, resetReminder: s.resetReminder || 0,
     turnDoneAlert: s.turnDoneAlert || 0, maskAlert: !!s.maskAlert };
 }
