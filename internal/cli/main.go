@@ -101,6 +101,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie groups                   routing groups: several models agents pick as one, group/<id>
   magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage|pace|weight|free|fast|cheap|drain|expiring] [stays=auto|session|turn|off]
   magpie group <id> | set <id> k=v… | rm <id>   show, change or remove one (magpie group help for more)
+  magpie project bind <path> <group>   pin a project's Claude Code to one routing group: group/<id> in its own settings.local.json; unbind takes it out, a group gone unpins it (magpie project help)
+  magpie projects                      the bound projects and whether their pins are in place
   magpie accounts [agent] [--json]  every subscription magpie knows, with each one's allowance used and when it resets
   magpie accounts add <agent>     sign in to one more Claude, ChatGPT or Google (Gemini CLI, Antigravity) subscription
   magpie accounts add copilot [--host <name>.ghe.com]   one more Copilot account, on github.com or an enterprise's GHE.com
@@ -613,6 +615,10 @@ func run(args []string) error {
 		return groups()
 	case "group":
 		return groupCmd(args)
+	case "project":
+		return projectCmd(args)
+	case "projects":
+		return projectsList()
 	case "serve":
 		return serveCmd(args[1:])
 	case "gateway-key":

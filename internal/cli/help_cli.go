@@ -46,6 +46,8 @@ func helpFor(args []string) string {
 			return ruleUsage
 		}
 		return groupUsage
+	case "project", "projects":
+		return projectUsage
 	case "library", "lib":
 		if len(args) > 1 && (args[1] == "project" || args[1] == "projects") {
 			return "  " + libraryProjectUsage
