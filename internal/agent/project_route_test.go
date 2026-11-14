@@ -1,10 +1,165 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/yetone/magpie/internal/settings"
 )
+
+// sandboxProjects 给本组测试一个自己的 magpie 配置目录：绑定表
+// projects.json 落在 settings.Dir() 下，绝不碰真实用户的。
+func sandboxProjects(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	return filepath.Join(settings.Dir(), "projects.json")
+}
+
+// =====================================================================
+// 绑定表 projects.json：key = ProjectRoot 的规范化路径，value = 组的
+// 完整 ref（group/<id>）。快照是另一半 map（root -> 写前原文），与绑定
+// 行解耦：删绑定行保快照，Save 只写 bindings 半边。
+// =====================================================================
+
+// TestProjectBindingsSaveAndLoadBack: 存两条（含中文路径）读回相等，
+// 文件落在 settings.Dir() 下。
+func TestProjectBindingsSaveAndLoadBack(t *testing.T) {
+	path := sandboxProjects(t)
+	cn := filepath.Join(t.TempDir(), "中文项目")
+	m := map[string]string{
+		filepath.Join(t.TempDir(), "proj-a"): "group/proj-a",
+		cn:                                   "group/中文组",
+	}
+	if err := SaveProjectBindings(m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("projects.json not written: %v", err)
+	}
+	got, err := ProjectBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(m) {
+		t.Fatalf("read back %d bindings, want %d (%v)", len(got), len(m), got)
+	}
+	for k, v := range m {
+		if got[k] != v {
+			t.Fatalf("binding %q = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+// TestProjectBindingsBrokenFileReadsAsError: 读不出来的表是未知，不是
+// 空——空 map 会让悬空对账以为没有绑定而跳过清理（failed read =
+// unknown 红线）。
+func TestProjectBindingsBrokenFileReadsAsError(t *testing.T) {
+	path := sandboxProjects(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := ProjectBindings(); err == nil {
+		t.Fatalf("a broken bindings file read as %v, want an error", m)
+	}
+}
+
+// TestProjectBindingsUnparsableKeptAside: 写前把不可解析的原文旁存
+// （.bad-<time>），绝不覆盖吞掉。
+func TestProjectBindingsUnparsableKeptAside(t *testing.T) {
+	path := sandboxProjects(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]string{"/proj": "group/x"}
+	if err := SaveProjectBindings(m); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := filepath.Glob(path + ".bad-*")
+	if err != nil || len(kept) == 0 {
+		t.Fatalf("the unparsable file was not kept aside (glob %v, err %v)", kept, err)
+	}
+	if b, err := os.ReadFile(kept[0]); err != nil || string(b) != "{not json" {
+		t.Fatalf("kept-aside copy = %q (err %v), want the original bytes", b, err)
+	}
+	got, err := ProjectBindings()
+	if err != nil || got["/proj"] != "group/x" {
+		t.Fatalf("after save, read back %v (err %v), want the saved binding", got, err)
+	}
+}
+
+// TestProjectBindingsMissingFileReadsAsNone: 没有文件 = 没有绑定，非错误。
+func TestProjectBindingsMissingFileReadsAsNone(t *testing.T) {
+	sandboxProjects(t)
+	m, err := ProjectBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 0 {
+		t.Fatalf("missing file read as %v, want none", m)
+	}
+}
+
+// TestProjectBindingsSaveKeepsSnapshots: Save 只写 bindings 半边——删掉
+// 一条绑定行，快照半边原样保留（删行保快照，双 map 解耦）。
+func TestProjectBindingsSaveKeepsSnapshots(t *testing.T) {
+	path := sandboxProjects(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := `{"bindings":{"/a":"group/x","/b":"group/y"},"snapshots":{"/a":"原文 A","/b":"原文 B"}}`
+	if err := os.WriteFile(path, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 只剩 /b 一条绑定：/a 的行被删，它的快照必须还在
+	if err := SaveProjectBindings(map[string]string{"/b": "group/y"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Bindings  map[string]string `json:"bindings"`
+		Snapshots map[string]string `json:"snapshots"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("saved file is not JSON: %v (%s)", err, b)
+	}
+	if f.Bindings["/a"] != "" || f.Bindings["/b"] != "group/y" {
+		t.Fatalf("bindings after save = %v, want only /b", f.Bindings)
+	}
+	if f.Snapshots["/a"] != "原文 A" || f.Snapshots["/b"] != "原文 B" {
+		t.Fatalf("snapshots after save = %v, want both kept", f.Snapshots)
+	}
+}
+
+// TestProjectBindingsOrphanSnapshotReadsFine: 只有快照没有绑定的文件是
+// 已知可控形态（解绑后的后悔药），读取不报错。
+func TestProjectBindingsOrphanSnapshotReadsFine(t *testing.T) {
+	path := sandboxProjects(t)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"snapshots":{"/gone":"旧文"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ProjectBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 0 {
+		t.Fatalf("orphan-snapshot file read as bindings %v, want none", m)
+	}
+}
 
 // =====================================================================
 // 项目根定位：ProjectRoot 把一个目录归到它所属 git 仓库（worktree）的
