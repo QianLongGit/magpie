@@ -53,12 +53,14 @@ func TestClaudeContextWindow(t *testing.T) {
 	if window() != "" {
 		t.Fatalf("a model of no known window keeps the last one's: %q", window())
 	}
-	// a 1M model is marked [1m], which Claude Code takes for 1M whatever
-	// the window says; beside a tier that isn't, the window told is the
-	// main's own, and the tier compacts by its own (多喝热水 on Discord:
-	// the tier's read as the main's), under Full window and without it
+	// a 1M model is marked [1m]; beside a tier that isn't, the window told
+	// is the main's own, and the tier compacts by its own (多喝热水 on
+	// Discord: the tier's read as the main's), under Full window and
+	// without it. Claude Code takes a Claude model so marked for 1M by the
+	// mark alone; one outside Claude's own it doesn't, so with no tier
+	// left unmarked its own window is told
 	set("model", "v/big[1m]")
-	if window() != "" {
+	if window() != "1000000" {
 		t.Fatalf("[1m]: %q", window())
 	}
 	budget := func(id string) string { v, _ := edit.GetJSON(path, budgetPath(id)); return v }
@@ -85,7 +87,7 @@ func TestClaudeContextWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	set("haiku", "")
-	if e, top := compact(); window() != "" || budget("v/small") != "" || e != "272000" || top != "" {
+	if e, top := compact(); window() != "1000000" || budget("v/small") != "" || e != "272000" || top != "" {
 		t.Fatalf("the tier gone: window %q, small %q, compact env %q, top-level %q", window(), budget("v/small"), e, top)
 	}
 	set("model", "v/mid")
@@ -96,6 +98,13 @@ func TestClaudeContextWindow(t *testing.T) {
 	set("model", "claude-opus-4-8")
 	if window() != "" {
 		t.Fatalf("Claude's own model kept magpie's window: %q", window())
+	}
+	// a Claude model marked [1m] is one Claude Code takes for 1M by the
+	// mark alone, so no window is told for it: the fallback for a main
+	// outside Claude's own (below) keeps Claude's as it was
+	set("model", "claude-opus-5-5[1m]")
+	if window() != "" {
+		t.Fatalf("Claude's own [1m] model kept magpie's window: %q", window())
 	}
 	set("model", "v/mid")
 	set("model", "")
@@ -110,7 +119,7 @@ func TestClaudeContextWindow(t *testing.T) {
 	if err := edit.SetJSON(path, edit.KV{Path: "env." + claudeContextEnv, Value: "64000"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, v := range []string{"v/small", "v/plain", "v/mid", "claude-opus-4-8", ""} {
+	for _, v := range []string{"v/small", "v/plain", "v/mid", "v/big[1m]", "claude-opus-4-8", ""} {
 		set("model", v)
 		if window() != "64000" {
 			t.Fatalf("the user's value after %q: %q", v, window())
@@ -139,5 +148,50 @@ func TestClaudeContextWindow(t *testing.T) {
 	set("model", "")
 	if window() != "400000" {
 		t.Fatalf("the user's 400000 was taken for magpie's: %q", window())
+	}
+}
+
+// TestClaudeForeignLongMainTellsItsWindow: a Claude Code wired to one
+// model outside Claude's own on every tier — a GLM coding plan on
+// zhipu/glm-5.3, whose catalog window is 1M, so writeTiers marks each tier
+// [1m] — leaves claudeWindow nothing to tell (it serves the tiers not
+// marked, and there are none), and Claude Code's own catalog knows Claude
+// models alone, so it ran the 1M model at its 200K default. The main's own
+// window is told, and every tier is handed its [1m] id.
+func TestClaudeForeignLongMainTellsItsWindow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	if err := provider.Save(provider.Provider{ID: "zhipu", Name: "Zhipu", Chat: "https://example.test/zhipu", Key: "k",
+		Models: []string{"glm-5.3"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SaveLive("zhipu", "https://example.test/zhipu", []catalog.Model{
+		{ID: "glm-5.3", Context: 1000000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".claude", "settings.json")
+	writeFile(t, path, `{"theme":"dark"}`)
+	a := claude(home)
+	for _, f := range append([]string{"model"}, claudeTiers...) {
+		if err := a.Field(f).Set("zhipu/glm-5.3"); err != nil {
+			t.Fatal(f, err)
+		}
+	}
+	window := func() string { v, _ := edit.GetJSON(path, "env."+claudeContextEnv); return v }
+	if window() != "1000000" {
+		t.Fatalf("every tier [1m], the main's own window: %q", window())
+	}
+	keys := []string{"env.ANTHROPIC_SMALL_FAST_MODEL"}
+	for _, tier := range claudeTiers {
+		keys = append(keys, "env."+tierEnv(tier))
+	}
+	for _, k := range keys {
+		if v, _ := edit.GetJSON(path, k); v != "zhipu/glm-5.3[1m]" {
+			t.Fatalf("%s: %q", k, v)
+		}
 	}
 }

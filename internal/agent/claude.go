@@ -1450,6 +1450,14 @@ func claudeIn(at place) *Agent {
 			return err
 		}
 		w := claudeWindow(main, tiers)
+		// a main Claude Code takes for 1M by its "[1m]" it takes so only
+		// for one of Claude's own: a wired model outside Claude's, every
+		// tier of it [1m] too, has no unmarked tier whose window would be
+		// told, and ran at Claude Code's 200K default. Its own window, from
+		// the source the mark came by (claudeOwnWindow), is told
+		if w <= 0 && claudeLongMain(main) {
+			w = claudeOwnWindow(main)
+		}
 		if desktopOn() {
 			if d := claudeDesktopWindow(); d > 0 && (w == 0 || d < w) {
 				w = d
@@ -2998,6 +3006,20 @@ func claudeWindow(main string, tiers map[string]string) int {
 		}
 	}
 	return w
+}
+
+// claudeOwnWindow is main's own window from the source writeTiers marked
+// it [1m] by (claude1MFor): magpie's shared models, else the catalog. A
+// main marked [1m] has a 1M window at one of them, so a fallback onto it
+// never misses; a main not marked is not its business.
+func claudeOwnWindow(main string) int {
+	m, _ := tierAt(main)
+	bare := strings.TrimSuffix(m, "[1m]")
+	window := map[string]int{}
+	for _, mm := range sharedModels("claude") {
+		window[mm.ID] = mm.Context
+	}
+	return cmp.Or(window[bare], catalog.ContextOf(bare))
 }
 
 // claudeDesktopWindow is the least window of the models Claude Desktop's
