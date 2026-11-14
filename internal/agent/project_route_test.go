@@ -340,6 +340,45 @@ func TestPinsCorruptFileSnapshottedThenRebuilt(t *testing.T) {
 	}
 }
 
+// TestPinsAWriteFailureKeepsTheRow: 文件写失败（.claude 写保护）→ 报
+// 错但绑定行保留——「重跑 bind 即修复」的前提（fork
+// write_failure_keeps_db_row）；恢复后重跑一遍即行与文件都在。
+func TestPinsAWriteFailureKeepsTheRow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0500 is not a write block on Windows")
+	}
+	root := pinProject(t)
+	dir := filepath.Join(root, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o0500); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectPins(root, "group/proj-w"); err == nil {
+		t.Fatal("a write-protected .claude let the pins through")
+	}
+	if got := readProjectsTable(t)[root].Group; got != "group/proj-w" {
+		t.Fatalf("a failed file write left no row (%q): re-running bind could not repair", got)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectPins(root, "group/proj-w"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readProjectsTable(t)[root].Group; got != "group/proj-w" {
+		t.Fatalf("row after the re-run = %q, want group/proj-w", got)
+	}
+	env := readLocalEnv(t, root)
+	for _, k := range wantPinEnv {
+		if env[k] != "group/proj-w" {
+			t.Fatalf("env.%s = %v after the re-run, want group/proj-w", k, env[k])
+		}
+	}
+}
+
 // TestPinsEveryKeyWrittenNoneLeftOut: 红线测试——逐一断言整组键完整，
 // 实现漏写任何一个（或写成别的值）都必须红。
 func TestPinsEveryKeyWrittenNoneLeftOut(t *testing.T) {

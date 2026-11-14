@@ -176,10 +176,10 @@ func localSettingsPath(root string) string {
 }
 
 // WriteProjectPins 把 root 的 settings.local.json 的 env 钉在 ref 上：
-// 模型键全 = ref，窗口键 = 组的最小成员窗口。写前把原文滚动快照进该
-// root 绑定行的 Snapshot（每次写前、单份、rebind 覆盖；文件缺失或空白
-// 不快照、行内旧值保留）。绑定表先行：行落表（没有先建）后文件才写，
-// 文件写失败行还在，重跑 bind 即修复（fork write_failure_keeps_db_row）。
+// 模型键全 = ref，窗口键 = 组的窗口。写前把原文滚动快照进该 root 绑
+// 定行的 Snapshot（每次写前、单份、rebind 覆盖；文件缺失或空白不快
+// 照、行内旧值保留）。绑定表先行：行落表（没有先建）后文件才写，文
+// 件写失败行还在，重跑 bind 即修复（fork write_failure_keeps_db_row）。
 func WriteProjectPins(root, ref string) error {
 	p := localSettingsPath(root)
 	orig, err := os.ReadFile(p)
@@ -213,8 +213,10 @@ func WriteProjectPins(root, ref string) error {
 }
 
 // projectWindow 是 ref 组告诉 Claude Code 的上下文窗口：共享模型清单
-// 里该组的 Context（成员最小窗口），找不到或为 0 用 magpie 的默认工作
-// 窗口（WorkingWindow 常量，非 claude- 开头 ID 被按 200K 假设的坑）。
+// 里该组的 Context——组的窗口是成员里最大的一个（group.go：太长的会
+// 话会流转到还有余量的成员，只有全组都装不下才 compact，#700/#712），
+// 找不到或为 0 用 magpie 的默认工作窗口（WorkingWindow 常量，非
+// claude- 开头 ID 被按 200K 假设的坑）。
 func projectWindow(ref string) int {
 	for _, m := range sharedModels("claude") {
 		if m.ID == ref && m.Context > 0 {
@@ -257,6 +259,11 @@ func rebuildLocalSettings(p string, kvs []edit.KV) error {
 // 本来一个 pin 键都没有时不动用户文件（幂等）；确有 pin 要拔时写前同
 // 样滚动快照进该行的 Snapshot（fork remove 写前快照同理）——行不存在
 // 则不建行（快照只随行存在，不落孤儿）。
+//
+// 「有没有 pin」的探测集是模型键、不含窗口键（与 ProjectSync 的判定
+// 集同一口径）：只剩窗口键一个的文件（模型 pin 都被用户拿掉了）算
+// 「没有 pin」，不动它——窗口键的值随组配置变化，单独残留不是漂移信
+// 号，bind 重跑会整组重写。
 func ClearProjectPins(root string) error {
 	p := localSettingsPath(root)
 	has := false
@@ -365,6 +372,9 @@ func DropGoneProjectBindings() (dropped []string) {
 	if !changed {
 		return nil
 	}
+	// dropped 的口径是「pin 已清、行已摘除」；表落盘失败只记日志——
+	// 行下次 fire 或对账再删：届时该项目的 pin 已无（ClearProjectPins
+	// 对没有 pin 的文件幂等早退），不会二次清文件。
 	if err := SaveProjectBindings(keep); err != nil {
 		log.Printf("saving project bindings: %v", err)
 	}

@@ -136,7 +136,11 @@ func TestProjectBindAnUnknownGroupTeachesGroupAdd(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "magpie group add") {
 		t.Fatalf("unknown group error = %v, want it to teach magpie group add", err)
 	}
-	if m, _ := agent.ProjectBindings(); len(m) != 0 {
+	m, err := agent.ProjectBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 0 {
 		t.Fatalf("a failed bind left bindings behind: %v", m)
 	}
 }
@@ -217,7 +221,11 @@ func TestProjectHelpAndStrayValues(t *testing.T) {
 	if _, err := runOut(t, "project", "frobnicate", root); err == nil {
 		t.Fatal("an unknown subcommand went ahead")
 	}
-	if m, _ := agent.ProjectBindings(); len(m) != 0 {
+	m, err := agent.ProjectBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 0 {
 		t.Fatalf("a refused bind left bindings behind: %v", m)
 	}
 }
