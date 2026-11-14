@@ -1,14 +1,17 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/settings"
@@ -131,16 +134,114 @@ func writeProjects(change func(*projectFile)) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	change(&f)
+	// 半边先立起来再交给 change：新表（文件缺失/损坏重建）的两个 map
+	// 都是 nil，往里赋值会 panic
 	if f.Bindings == nil {
 		f.Bindings = map[string]string{}
 	}
 	if f.Snapshots == nil {
 		f.Snapshots = map[string]string{}
 	}
+	change(&f)
 	out, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
 	return edit.WriteAtomic(p, append(out, '\n'))
+}
+
+// =====================================================================
+// pin 写入器：项目 root 的 .claude/settings.local.json 里，把 Claude
+// Code 选模型的每一个 env 出口都钉在绑定组上（fork 的「绑定即唯一出
+// 口」语义——部分 pin 留逃逸口 = 功能打折）。整组键一起写也一起清：
+// 残留半组 pin（tier 行为不一致）比不 pin 更糟。
+// =====================================================================
+
+// projectPinEnv 是被钉住的模型键全集：四个 tier 默认、主模型、旧版
+// Claude Code 仍读的 SMALL_FAST、子代理与 auto mode 分类器（claude.go
+// 的 claudeEnv/claudeAutoModeEnv 同一清单）。窗口键 claudeContextEnv
+// 配套写入但单独取值。
+var projectPinEnv = []string{
+	"ANTHROPIC_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+	"ANTHROPIC_SMALL_FAST_MODEL",
+	"CLAUDE_CODE_SUBAGENT_MODEL", claudeAutoModeEnv,
+}
+
+// localSettingsPath 是项目根下的 settings.local.json（个人私有配置，
+// 天然不进 git）。
+func localSettingsPath(root string) string {
+	return filepath.Join(root, ".claude", "settings.local.json")
+}
+
+// WriteProjectPins 把 root 的 settings.local.json 的 env 钉在 ref 上：
+// 模型键全 = ref，窗口键 = 组的最小成员窗口。写前把原文滚动快照进
+// projects.json 的快照半边（每次写前、单份、rebind 覆盖；文件缺失不快
+// 照）。绑定表先行：行（没有先建）与快照落表后文件才写，文件写失败行
+// 还在，重跑 bind 即修复（fork write_failure_keeps_db_row）。
+func WriteProjectPins(root, ref string) error {
+	p := localSettingsPath(root)
+	orig, err := os.ReadFile(p)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := writeProjects(func(f *projectFile) {
+		f.Bindings[root] = ref
+		if len(bytes.TrimSpace(orig)) > 0 {
+			f.Snapshots[root] = string(orig)
+		}
+	}); err != nil {
+		return err
+	}
+	kvs := make([]edit.KV, 0, len(projectPinEnv)+1)
+	for _, k := range projectPinEnv {
+		kvs = append(kvs, edit.KV{Path: "env." + k, Value: ref})
+	}
+	kvs = append(kvs, edit.KV{Path: "env." + claudeContextEnv, Value: strconv.Itoa(projectWindow(ref))})
+	if err := edit.SetJSON(p, kvs...); err != nil {
+		if !validLocalJSON(orig) {
+			// 损坏文件：原文已快照，按最小结构重建（fork
+			// set_rebuilds_corrupted_json 同形）
+			return rebuildLocalSettings(p, kvs)
+		}
+		return err
+	}
+	return nil
+}
+
+// projectWindow 是 ref 组告诉 Claude Code 的上下文窗口：共享模型清单
+// 里该组的 Context（成员最小窗口），找不到或为 0 用 magpie 的默认工作
+// 窗口（WorkingWindow 常量，非 claude- 开头 ID 被按 200K 假设的坑）。
+func projectWindow(ref string) int {
+	for _, m := range sharedModels("claude") {
+		if m.ID == ref && m.Context > 0 {
+			return m.Context
+		}
+	}
+	return settings.WorkingWindow
+}
+
+// validLocalJSON 说 b 是否是 SetJSON 能编辑的 JSON/JSONC（空与缺失不
+// 算损坏）。判定与 edit.SetJSON 的解析同一口径（注释剥离后 json.Valid），
+// 带注释的合法文件走 SetJSON 的保格式路径，不会被误重建。
+func validLocalJSON(b []byte) bool {
+	if len(bytes.TrimSpace(b)) == 0 {
+		return true
+	}
+	return json.Valid(jsonc.ToJSON(edit.TrimBOM(b)))
+}
+
+// rebuildLocalSettings 把损坏的 settings.local.json 重建为只含 pin 的
+// 最小结构（原文已在快照半边，可手工取回）。
+func rebuildLocalSettings(p string, kvs []edit.KV) error {
+	env := map[string]string{}
+	for _, kv := range kvs {
+		env[strings.TrimPrefix(kv.Path, "env.")] = fmt.Sprint(kv.Value)
+	}
+	b, err := json.MarshalIndent(map[string]any{"env": env}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return edit.WriteAtomic(p, append(b, '\n'))
 }

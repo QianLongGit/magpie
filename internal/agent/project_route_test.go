@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/yetone/magpie/internal/settings"
@@ -158,6 +159,203 @@ func TestProjectBindingsOrphanSnapshotReadsFine(t *testing.T) {
 	}
 	if len(m) != 0 {
 		t.Fatalf("orphan-snapshot file read as bindings %v, want none", m)
+	}
+}
+
+// =====================================================================
+// pin 写入器 WriteProjectPins：把 root/.claude/settings.local.json 的
+// env 钉在一个组 ref 上。整组键一起写、一起清——残留半组 pin（tier 行
+// 为不一致）比不 pin 更糟。窗口键的值与 magpie 接线同一惯例（字符串）。
+// =====================================================================
+
+// wantPinEnv 是全部模型 pin 键（硬编码进测试：实现漏掉任何一个这里都
+// 必须红，不许从实现的 projectPinEnv 读——那会变成同义反复）。
+var wantPinEnv = []string{
+	"ANTHROPIC_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+	"ANTHROPIC_SMALL_FAST_MODEL",
+	"CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_AUTO_MODE_MODEL",
+}
+
+// pinProject 造一个带 .git 的沙箱项目并独立绑定表，返回项目根。
+func pinProject(t *testing.T) string {
+	t.Helper()
+	sandboxProjects(t)
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// readProjectsTable 读回 projects.json 的两个半边（同包直读，schema 即
+// 契约）。
+func readProjectsTable(t *testing.T) projectFile {
+	t.Helper()
+	b, err := os.ReadFile(projectsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f projectFile
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("projects.json unreadable: %v (%s)", err, b)
+	}
+	return f
+}
+
+// readLocalEnv 解析项目的 settings.local.json，返回 env 对象。
+func readLocalEnv(t *testing.T, root string) map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(localSettingsPath(root))
+	if err != nil {
+		t.Fatalf("settings.local.json unreadable: %v", err)
+	}
+	var f struct {
+		Env map[string]any `json:"env"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("settings.local.json is not JSON: %v (%s)", err, b)
+	}
+	return f.Env
+}
+
+// TestPinsCreateMinimalStructureWhenFileMissing: 文件不存在时建最小结
+// 构，绑定行建立，无原文可快照则 Snapshot 为空。
+func TestPinsCreateMinimalStructureWhenFileMissing(t *testing.T) {
+	root := pinProject(t)
+	if err := WriteProjectPins(root, "group/proj-x"); err != nil {
+		t.Fatal(err)
+	}
+	env := readLocalEnv(t, root)
+	for _, k := range wantPinEnv {
+		if env[k] != "group/proj-x" {
+			t.Fatalf("env.%s = %v, want group/proj-x", k, env[k])
+		}
+	}
+	if env[claudeContextEnv] != strconv.Itoa(settings.WorkingWindow) {
+		t.Fatalf("env.%s = %v, want %d (fallback window)", claudeContextEnv, env[claudeContextEnv], settings.WorkingWindow)
+	}
+	f := readProjectsTable(t)
+	if f.Bindings[root] != "group/proj-x" {
+		t.Fatalf("binding row = %v, want group/proj-x", f.Bindings)
+	}
+	if f.Snapshots[root] != "" {
+		t.Fatalf("snapshot = %q, want none (no file was there)", f.Snapshots[root])
+	}
+}
+
+// TestPinsKeepUsersOtherEnvAndTopLevelKeys: 用户自己的 env 键与顶层键
+// 原样保留（fork set_preserves_user_other_headers 对应）。
+func TestPinsKeepUsersOtherEnvAndTopLevelKeys(t *testing.T) {
+	root := pinProject(t)
+	p := localSettingsPath(root)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := `{"env":{"ANTHROPIC_API_KEY":"k"},"permissions":{"allow":["Bash(ls:*)"]}}`
+	if err := os.WriteFile(p, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectPins(root, "group/proj-x"); err != nil {
+		t.Fatal(err)
+	}
+	env := readLocalEnv(t, root)
+	if env["ANTHROPIC_API_KEY"] != "k" {
+		t.Fatalf("user's own env key lost: %v", env)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Permissions map[string]any `json:"permissions"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatalf("file is not JSON after pins: %v (%s)", err, b)
+	}
+	allow, _ := f.Permissions["allow"].([]any)
+	if len(allow) != 1 || allow[0] != "Bash(ls:*)" {
+		t.Fatalf("permissions changed: %s", b)
+	}
+}
+
+// TestPinsRebindingRollsSnapshot: 每次写前滚动单份快照（fork
+// set_backs_up_existing_file_once_per_write 的 REPLACE 语义）。
+func TestPinsRebindingRollsSnapshot(t *testing.T) {
+	root := pinProject(t)
+	p := localSettingsPath(root)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p1 := `{"env":{"ANTHROPIC_API_KEY":"one"}}`
+	if err := os.WriteFile(p, []byte(p1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectPins(root, "group/a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readProjectsTable(t).Snapshots[root]; got != p1 {
+		t.Fatalf("snapshot after first bind = %q, want %q", got, p1)
+	}
+	p2 := `{"env":{"ANTHROPIC_API_KEY":"two"},"model":"x"}`
+	if err := os.WriteFile(p, []byte(p2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectPins(root, "group/a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readProjectsTable(t).Snapshots[root]; got != p2 {
+		t.Fatalf("snapshot after rebind = %q, want %q (rolled)", got, p2)
+	}
+}
+
+// TestPinsCorruptFileSnapshottedThenRebuilt: 损坏 JSON 先快照后按最小
+// 结构重建（fork set_rebuilds_corrupted_json 同形）。
+func TestPinsCorruptFileSnapshottedThenRebuilt(t *testing.T) {
+	root := pinProject(t)
+	p := localSettingsPath(root)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("not json{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectPins(root, "group/proj-x"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readProjectsTable(t).Snapshots[root]; got != "not json{" {
+		t.Fatalf("corrupt original not snapshotted: %q", got)
+	}
+	env := readLocalEnv(t, root)
+	if len(env) != len(wantPinEnv)+1 {
+		t.Fatalf("rebuilt file holds %d env keys (%v), want only the %d pins + window",
+			len(env), env, len(wantPinEnv)+1)
+	}
+}
+
+// TestPinsEveryKeyWrittenNoneLeftOut: 红线测试——逐一断言整组键完整，
+// 实现漏写任何一个（或写成别的值）都必须红。
+func TestPinsEveryKeyWrittenNoneLeftOut(t *testing.T) {
+	root := pinProject(t)
+	if err := WriteProjectPins(root, "group/proj-x"); err != nil {
+		t.Fatal(err)
+	}
+	env := readLocalEnv(t, root)
+	seen := map[string]bool{}
+	for k, v := range env {
+		seen[k] = true
+		if v != "group/proj-x" && k != claudeContextEnv {
+			t.Fatalf("env.%s = %v, unexpected", k, v)
+		}
+	}
+	for _, k := range wantPinEnv {
+		if !seen[k] {
+			t.Fatalf("env.%s missing from %v", k, env)
+		}
+	}
+	if !seen[claudeContextEnv] {
+		t.Fatalf("env.%s (window) missing from %v", claudeContextEnv, env)
 	}
 }
 
