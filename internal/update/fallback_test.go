@@ -89,6 +89,7 @@ func newFallbackWorld(t *testing.T, version string) *fallbackWorld {
 // checked against the embedded key, and its file downloaded from GitHub
 // and installed by hash.
 func TestUpdateWorksFromGitHubWhenTheFeedIsUnreachable(t *testing.T) {
+	t.Skip("the fork takes no official feed: a failed feed never falls back onto GitHub (update.go's Feed)")
 	for _, limited := range []bool{false, true} {
 		t.Run(fmt.Sprintf("api limited %v", limited), func(t *testing.T) {
 			w := newFallbackWorld(t, "0.1.4000")
@@ -124,6 +125,7 @@ func TestUpdateWorksFromGitHubWhenTheFeedIsUnreachable(t *testing.T) {
 // A release GitHub gives with a signature that isn't the key's is refused,
 // on the API path and on the redirect path alike.
 func TestGitHubFallbackRefusesABadSignature(t *testing.T) {
+	t.Skip("the fork takes no official feed: the GitHub fallback never runs (update.go's Feed)")
 	for _, limited := range []bool{false, true} {
 		for _, bad := range []string{"wrong key", "other sums", "no sig", "junk"} {
 			t.Run(fmt.Sprintf("limited %v %s", limited, bad), func(t *testing.T) {
@@ -154,6 +156,7 @@ func TestGitHubFallbackRefusesABadSignature(t *testing.T) {
 
 // A release signed for another version can't be passed off as the tag's.
 func TestGitHubFallbackBindsTheVersion(t *testing.T) {
+	t.Skip("the fork takes no official feed: the GitHub fallback never runs (update.go's Feed)")
 	w := newFallbackWorld(t, "0.1.4000")
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	signingKey = base64.StdEncoding.EncodeToString(pub)
@@ -166,6 +169,7 @@ func TestGitHubFallbackBindsTheVersion(t *testing.T) {
 // The feed's old unsigned allowance doesn't carry over: a release GitHub
 // gives with no signature is refused even for an old version.
 func TestGitHubFallbackNeedsASignatureForOldVersionsToo(t *testing.T) {
+	t.Skip("the fork takes no official feed: the GitHub fallback never runs (update.go's Feed)")
 	w := newFallbackWorld(t, "0.1.100")
 	w.sig = ""
 	if _, err := Latest(context.Background()); err == nil {
@@ -188,6 +192,7 @@ func TestGitHubIsOnlyAFallback(t *testing.T) {
 
 // On Stable the site's choice can't be made by GitHub: no fallback.
 func TestGitHubFallbackSkipsStable(t *testing.T) {
+	t.Skip("the fork takes no official feed: the GitHub fallback never runs (update.go's Feed)")
 	w := newFallbackWorld(t, "0.1.4000")
 	stableFor(t, "stable")
 	if _, err := Latest(context.Background()); err == nil {

@@ -52,13 +52,16 @@ func liveFeed(t *testing.T, w *fallbackWorld, version string) (feed, file *atomi
 		}
 	}))
 	t.Cleanup(site.Close)
-	siteFeed = site.URL + "/api/latest"
+	// the fork names no default feed (update.go's Feed): the feed under
+	// test is this one the test configures, as a user's own would be
+	t.Setenv("MAGPIE_UPDATE_FEED", site.URL+"/api/latest")
 	return
 }
 
 // GitHub only: the feed isn't asked, the release comes from GitHub and the
 // file is downloaded from GitHub, though the site answers.
 func TestSourceGitHubNeverAsksTheSite(t *testing.T) {
+	t.Skip("the fork takes no official feed: the GitHub-only source never turns on (update.go's Feed)")
 	w := newFallbackWorld(t, "0.1.4000")
 	feed, file := liveFeed(t, w, "0.1.4000")
 	sourceFor(t, settings.UpdateSourceGitHub)
@@ -81,6 +84,7 @@ func TestSourceGitHubNeverAsksTheSite(t *testing.T) {
 // GitHub only, with the file named by the site's feed (Stable reads its
 // release from the site): the download still starts at github.com.
 func TestSourceGitHubDownloadsAFeedFileFromGitHub(t *testing.T) {
+	t.Skip("the fork takes no official feed: the GitHub-only source never turns on (update.go's Feed)")
 	w := newFallbackWorld(t, "0.1.4000")
 	_, file := liveFeed(t, w, "0.1.4000")
 	rel, err := Latest(context.Background()) // automatic: the site's feed
@@ -183,8 +187,8 @@ func TestSourceGitHubRefusesWhatIsNotSigned(t *testing.T) {
 // github.com address is downloaded from where it is.
 func TestSourceGitHubKeepsACustomFeed(t *testing.T) {
 	w := newFallbackWorld(t, "0.1.4000")
-	feed, _ := liveFeed(t, w, "0.1.4000")
-	t.Setenv("MAGPIE_UPDATE_FEED", siteFeed+"?mine")
+	feed, _ := liveFeed(t, w, "0.1.4000") // also sets MAGPIE_UPDATE_FEED to its feed
+	t.Setenv("MAGPIE_UPDATE_FEED", os.Getenv("MAGPIE_UPDATE_FEED")+"?mine")
 	sourceFor(t, settings.UpdateSourceGitHub)
 	if _, err := Latest(context.Background()); err != nil || feed.Load() != 1 || w.apiHits.Load() != 0 {
 		t.Fatalf("err %v, feed %d, GitHub API %d", err, feed.Load(), w.apiHits.Load())

@@ -27,11 +27,13 @@ type Note struct {
 
 // NotesFeed is where the notes of past releases are listed: beside the
 // update feed, on magpie's site. MAGPIE_NOTES_FEED points it elsewhere.
+// Like Feed (update.go), this fork names no default: the site's notes
+// describe the official releases, not this fork's.
 func NotesFeed() string {
 	if f := os.Getenv("MAGPIE_NOTES_FEED"); f != "" {
 		return f
 	}
-	return Site + "/api/notes"
+	return ""
 }
 
 // ReleasePage is version's page on GitHub, where its notes are when the
@@ -80,8 +82,12 @@ func NotesBack(ctx context.Context, upto string, n int, lang string) ([]Note, er
 	return Back(notes, upto, n), nil
 }
 
-// askNotes is the site's list for q, each release's notes in lang.
+// askNotes is the site's list for q, each release's notes in lang. Without
+// a feed (this fork's default) the list is simply empty.
 func askNotes(ctx context.Context, q url.Values, lang string) ([]Note, error) {
+	if NotesFeed() == "" {
+		return nil, nil
+	}
 	if lang != "" {
 		q.Set("lang", lang)
 	}
