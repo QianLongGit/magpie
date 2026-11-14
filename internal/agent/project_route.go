@@ -245,3 +245,59 @@ func rebuildLocalSettings(p string, kvs []edit.KV) error {
 	}
 	return edit.WriteAtomic(p, append(b, '\n'))
 }
+
+// =====================================================================
+// pin 清除与同步状态。
+// =====================================================================
+
+// ClearProjectPins 拔掉 root 的全部 pin 键（模型 8 键 + 窗口键，整组一
+// 起清——残留半组 pin 让 tier 行为不一致，比不 pin 更糟）。文件缺失或
+// 本来一个 pin 键都没有时不动用户文件（幂等）；确有 pin 要拔时写前同
+// 样滚动快照进 projects.json 的快照半边（fork remove 写前快照同理）。
+func ClearProjectPins(root string) error {
+	p := localSettingsPath(root)
+	has := false
+	for _, k := range projectPinEnv {
+		if _, ok := edit.GetJSON(p, "env."+k); ok {
+			has = true
+			break
+		}
+	}
+	if !has {
+		return nil
+	}
+	if orig, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(orig)) > 0 {
+		if err := writeProjects(func(f *projectFile) { f.Snapshots[root] = string(orig) }); err != nil {
+			return err
+		}
+	}
+	paths := make([]string, 0, len(projectPinEnv)+1)
+	for _, k := range projectPinEnv {
+		paths = append(paths, "env."+k)
+	}
+	paths = append(paths, "env."+claudeContextEnv)
+	return edit.DelJSON(p, paths...)
+}
+
+// ProjectSyncState 是一个绑定项目的文件 pin 与绑定表的一致状态。
+type ProjectSyncState int
+
+const (
+	// ProjectSynced：全部模型 pin 键都在且等于绑定的 ref。
+	ProjectSynced ProjectSyncState = iota
+	// ProjectOutOfSync：有键缺失或值不同（文件缺失也算）——重跑 bind
+	// 即修复。
+	ProjectOutOfSync
+)
+
+// ProjectSync 说 root 的文件 pin 是否还钉在 ref 上。只看模型键：窗口
+// 键的值随组配置变化，不是漂移信号。
+func ProjectSync(root, ref string) ProjectSyncState {
+	p := localSettingsPath(root)
+	for _, k := range projectPinEnv {
+		if v, ok := edit.GetJSON(p, "env."+k); !ok || v != ref {
+			return ProjectOutOfSync
+		}
+	}
+	return ProjectSynced
+}

@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -356,6 +358,133 @@ func TestPinsEveryKeyWrittenNoneLeftOut(t *testing.T) {
 	}
 	if !seen[claudeContextEnv] {
 		t.Fatalf("env.%s (window) missing from %v", claudeContextEnv, env)
+	}
+}
+
+// =====================================================================
+// pin 清除与同步状态：清除覆盖全部 pin 键（模型 8 键 + 窗口键）——残留
+// 半组 pin 比 不 pin 更糟；同步状态只看模型键（窗口值随组配置变化，非
+// 漂移信号）。
+// =====================================================================
+
+// TestClearDropsEveryPinKeyKeepsTheRest: 红线测试——拔除必须覆盖整组键，
+// 实现漏拔任何一个都必须红；用户的 env 键与顶层键原样，写前滚动快照。
+func TestClearDropsEveryPinKeyKeepsTheRest(t *testing.T) {
+	root := pinProject(t)
+	if err := WriteProjectPins(root, "group/proj-x"); err != nil {
+		t.Fatal(err)
+	}
+	p := localSettingsPath(root)
+	if err := edit.SetJSON(p,
+		edit.KV{Path: "env.ANTHROPIC_API_KEY", Value: "user-key"},
+		edit.KV{Path: "permissions.allow", Value: []string{"Bash(ls:*)"}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearProjectPins(root); err != nil {
+		t.Fatal(err)
+	}
+	env := readLocalEnv(t, root)
+	for _, k := range append(append([]string{}, wantPinEnv...), claudeContextEnv) {
+		if v, ok := env[k]; ok {
+			t.Fatalf("env.%s = %v after clear, want gone", k, v)
+		}
+	}
+	if env["ANTHROPIC_API_KEY"] != "user-key" {
+		t.Fatalf("user's own env key lost: %v", env)
+	}
+	after, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), "Bash(ls:*)") {
+		t.Fatalf("permissions lost after clear: %s", after)
+	}
+	// 写前滚动快照：清的是「全 pin + 用户键」的原文
+	if got := readProjectsTable(t).Snapshots[root]; !strings.Contains(got, "user-key") {
+		t.Fatalf("pre-clear snapshot = %q, want the file as it was (with user-key)", got)
+	}
+}
+
+// TestClearOkWhenFileMissing: 文件不存在 → nil（幂等）。
+func TestClearOkWhenFileMissing(t *testing.T) {
+	root := pinProject(t)
+	if err := ClearProjectPins(root); err != nil {
+		t.Fatalf("clear on missing file = %v, want nil", err)
+	}
+}
+
+// TestClearLeavesAPinlessFileAlone: 没有 pin 键的文件逐字节不动。
+func TestClearLeavesAPinlessFileAlone(t *testing.T) {
+	root := pinProject(t)
+	p := localSettingsPath(root)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := "{\n  \"env\": {\n    \"ANTHROPIC_API_KEY\": \"k\"\n  }\n}\n"
+	if err := os.WriteFile(p, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearProjectPins(root); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != orig {
+		t.Fatalf("pinless file changed:\n%s\nwant:\n%s", after, orig)
+	}
+}
+
+// TestSyncSaysPinsPresentAndMatching: 全 8 键在且 = ref → Synced（窗口
+// 值不参与判定）。
+func TestSyncSaysPinsPresentAndMatching(t *testing.T) {
+	root := pinProject(t)
+	if err := WriteProjectPins(root, "group/proj-x"); err != nil {
+		t.Fatal(err)
+	}
+	// 窗口值改掉也不算漂移
+	if err := edit.SetJSON(localSettingsPath(root), edit.KV{Path: "env." + claudeContextEnv, Value: "999"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProjectSync(root, "group/proj-x"); got != ProjectSynced {
+		t.Fatalf("ProjectSync = %v, want ProjectSynced", got)
+	}
+}
+
+// TestSyncCatchesMissingPinMismatchedValueAndMissingFile: 三态矩阵——缺
+// 一个键、值不对、文件缺失都报 OutOfSync。
+func TestSyncCatchesMissingPinMismatchedValueAndMissingFile(t *testing.T) {
+	// 缺一个键
+	root := pinProject(t)
+	if err := WriteProjectPins(root, "group/a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.DelJSON(localSettingsPath(root), "env."+wantPinEnv[3]); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProjectSync(root, "group/a"); got != ProjectOutOfSync {
+		t.Fatalf("a missing pin read %v, want OutOfSync", got)
+	}
+	// 值不对（换了组没重绑）
+	root2 := pinProject(t)
+	if err := WriteProjectPins(root2, "group/a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProjectSync(root2, "group/b"); got != ProjectOutOfSync {
+		t.Fatalf("a mismatched value read %v, want OutOfSync", got)
+	}
+	// 文件没了
+	root3 := pinProject(t)
+	if err := WriteProjectPins(root3, "group/a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(localSettingsPath(root3)); err != nil {
+		t.Fatal(err)
+	}
+	if got := ProjectSync(root3, "group/a"); got != ProjectOutOfSync {
+		t.Fatalf("a missing file read %v, want OutOfSync", got)
 	}
 }
 
