@@ -14,16 +14,16 @@ import (
 )
 
 // fakeReach answers reachProbe from answers (a base missing is down), and
-// starts with no probe made.
+// starts with no probe made. A probe an earlier test left still out is
+// waited for first (reachForget): its write would land in the nil map
+// this setup leaves otherwise.
 func fakeReach(t *testing.T, answers map[string]bool) *sync.Mutex {
 	t.Helper()
 	var mu sync.Mutex
 	was, age := reachProbe, reachAge
 	reachProbe = func(base string) bool { mu.Lock(); defer mu.Unlock(); return answers[base] }
 	reachAge = time.Hour
-	reach.Lock()
-	reach.m = nil
-	reach.Unlock()
+	reachForget()
 	t.Cleanup(func() {
 		reachForget()
 		reachProbe, reachAge = was, age
@@ -253,6 +253,32 @@ func TestReachProbe(t *testing.T) {
 	srv.Close()
 	if realReachProbe(srv.URL) {
 		t.Fatal("a closed port taken for an answer")
+	}
+}
+
+// TestFakeReachWaitsForAnInflightProbe: fakeReach 的 setup 不得在还有探
+// 测在飞时把 reach.m 置 nil——慢探针（前一个测试留下的形态）落笔时写
+// 进 nil map，整个测试二进制 panic（本机 11:14 的一次整包跑实发）。断
+// 言用时间戳排序：setup 的返回不得早于在飞探测的应答；注入 60ms 探针
+// 延迟复现，不靠重跑碰运气。
+func TestFakeReachWaitsForAnInflightProbe(t *testing.T) {
+	was, age := reachProbe, reachAge
+	t.Cleanup(func() { reachProbe, reachAge = was, age })
+	answered := make(chan time.Time, 1)
+	release := make(chan struct{})
+	// 慢探针直接被闭包捕获：经包变量间接调的话，fakeReach 先换掉了
+	// reachProbe，探测 goroutine 跑的就是替换后的快函数，永远不阻塞
+	slow := func(base string) bool { <-release; answered <- time.Now(); return false }
+	reachProbe = slow
+	reachAge = time.Millisecond
+	probed("inflight", func() bool { return slow("x") })
+	go func() { time.Sleep(60 * time.Millisecond); close(release) }()
+	back := make(chan time.Time, 1)
+	go func() { fakeReach(t, map[string]bool{}); back <- time.Now() }()
+	done := <-answered
+	// 旧代码：setup 立即置 nil 返回，back 早于探测应答
+	if setupDone := <-back; setupDone.Before(done) {
+		t.Fatalf("fakeReach returned at %v, before the inflight probe answered at %v: its write lands in a nil map", setupDone, done)
 	}
 }
 
