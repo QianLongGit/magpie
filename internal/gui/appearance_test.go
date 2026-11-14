@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -279,7 +280,7 @@ func TestAccentTintsGrounds(t *testing.T) {
 	// a grey pick leaves the grounds as they were
 	g, _ := parseHex("#808080")
 	for _, s := range darkSurfaces {
-		if got := tint(s.base, g, darkTint); got.hex() != s.base.hex() {
+		if got := ground(s.base, g, true); got.hex() != s.base.hex() {
 			t.Errorf("grey tints %s: %s", s.name, got.hex())
 		}
 	}
@@ -287,15 +288,15 @@ func TestAccentTintsGrounds(t *testing.T) {
 	for _, pick := range []string{"#ffffff", "#000000", "#ffff00", "#00ff00", "#ff0000", "#0000ff", "#7c3aed", "#0d9488", "#db2777"} {
 		c, _ := parseHex(pick)
 		for _, dark := range []bool{false, true} {
-			surfaces, k, fg, accent := lightSurfaces, lightTint, rgb{0x1c, 0x1c, 0x21}, accentOn(c, false)
+			surfaces, fg, accent := lightSurfaces, rgb{0x1c, 0x1c, 0x21}, accentOn(c, false)
 			if dark {
-				surfaces, k, fg, accent = darkSurfaces, darkTint, rgb{0xed, 0xed, 0xf1}, accentOn(c, true)
+				surfaces, fg, accent = darkSurfaces, rgb{0xed, 0xed, 0xf1}, accentOn(c, true)
 			}
 			for _, s := range surfaces {
 				if strings.HasPrefix(s.name, "--line") || s.name == "--seg-track" {
 					continue
 				}
-				bg := tint(s.base, c, k)
+				bg := ground(s.base, c, dark)
 				if r := contrast(fg, bg); r < 7 {
 					t.Errorf("%s dark=%v: text on %s %s is %.2f:1", pick, dark, s.name, bg.hex(), r)
 				}
@@ -351,7 +352,7 @@ func TestTintBasesAreAppCSS(t *testing.T) {
 // writes it again.
 func TestLookFixture(t *testing.T) {
 	want := map[string]string{}
-	for _, a := range []string{"#0d9488", "#db2777", "#7c3aed"} {
+	for _, a := range []string{"#0d9488", "#db2777", "#7c3aed", "#000000", "#52525b", "#191047"} {
 		want[a] = lookCSS(settings.Settings{Accent: a})
 	}
 	b, _ := json.MarshalIndent(want, "", "  ")
@@ -365,5 +366,113 @@ func TestLookFixture(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(got, b) {
 		t.Fatalf("%s is not lookCSS's (UPDATE=1 go test -run TestLookFixture writes it): %v", path, err)
+	}
+}
+
+// Black, Graphite and magpie's own drew the same grey grounds, and black's
+// ink was Graphite's grey (CHENGJIAHEGOXIS on X, 「这三个颜色……都显示是一样
+// 的」, 「尤其是黑色始终一直是灰色」). Black now draws a black page on the
+// dark theme, its cards, menus and lines the same steps above it, with a
+// light ink of its own; on the light theme it is black ink. Graphite keeps
+// the grey grounds with its grey ink, and magpie's own draws nothing.
+func TestBlackIsBlack(t *testing.T) {
+	blk, _ := parseHex("#000000")
+	gra, _ := parseHex("#52525b")
+	accent := func(c rgb, dark bool) rgb {
+		m := regexp.MustCompile(`--accent:(#[0-9a-f]{6})`).FindStringSubmatch(accentVars(c, dark))
+		a, _ := parseHex(m[1])
+		return a
+	}
+	// the dark theme's page is black, and every ground keeps its step
+	// above it, in the same order as app.css's
+	if got := ground(darkBg, blk, true); got.hex() != "#000000" {
+		t.Errorf("black's dark page is %s, not black", got.hex())
+	}
+	for _, set := range [][]surface{darkSurfaces, darkPanelSurfaces, {{"--pop-bg", darkPop}}} {
+		for _, s := range set {
+			got := ground(s.base, blk, true)
+			if lb, lg := s.base.luminance(), got.luminance(); lg >= lb {
+				t.Errorf("%s: black leaves %s at %s", s.name, s.base.hex(), got.hex())
+			}
+			want := (s.base[0]+s.base[1]+s.base[2])/3 - (darkBg[0]+darkBg[1]+darkBg[2])/3
+			if g := (got[0] + got[1] + got[2]) / 3; math.Abs(g-max(0, want)) > 2 {
+				t.Errorf("%s: %s is not its step %.0f above black", s.name, got.hex(), want)
+			}
+		}
+	}
+	// Graphite (lighter than the page) keeps the grounds' grey
+	for _, s := range darkSurfaces {
+		if got := ground(s.base, gra, true); got.hex() != s.base.hex() {
+			t.Errorf("Graphite moves %s to %s", s.name, got.hex())
+		}
+	}
+	// black's ink is not Graphite's grey: light on the dark theme, black
+	// on the light one, each reading on its own grounds
+	if a, g := accent(blk, true), accent(gra, true); contrast(a, g) < 1.8 || a.luminance() < 0.6 {
+		t.Errorf("dark: black's accent %s is a grey like Graphite's %s", a.hex(), g.hex())
+	}
+	if a := accent(blk, false); a.hex() != "#000000" {
+		t.Errorf("light: black's accent is %s", a.hex())
+	}
+	if r := contrast(accent(blk, true), ground(darkBg, blk, true)); r < 7 {
+		t.Errorf("dark: black's accent on its page is %.2f:1", r)
+	}
+	// and the light theme's sibling: white's ink is dark, not a grey
+	wht, _ := parseHex("#ffffff")
+	if a := accent(wht, false); a.luminance() > 0.03 {
+		t.Errorf("light: white's accent %s is a grey like Graphite's", a.hex())
+	}
+	// the page's text reads on black's grounds
+	for _, s := range darkSurfaces {
+		if r := contrast(rgb{0xed, 0xed, 0xf1}, ground(s.base, blk, true)); r < 7 {
+			t.Errorf("%s: text on black's %s is %.2f:1", s.name, ground(s.base, blk, true).hex(), r)
+		}
+	}
+}
+
+// Black's page was #000003 with blue-grey cards, a blue-black beside
+// Chrome's #000000, and the darkest navy of the system's picker drew the
+// same grey page as Graphite, its mean channel no darker than the page's
+// (CHENGJIAHEGOXIS on X: 「纯黑……感觉色对不上」, 「感觉是有浅灰存在，所以
+// 导致深变浅」). Black's grounds are neutral greys over #000000, a dark
+// colour's page goes down toward black in its own hue, and Graphite and
+// the presets keep magpie's grounds.
+func TestDarkPickDarkensPage(t *testing.T) {
+	blk, _ := parseHex("#000000")
+	for _, set := range [][]surface{darkSurfaces, darkPanelSurfaces, {{"--pop-bg", darkPop}}} {
+		for _, s := range set {
+			if got := ground(s.base, blk, true); got.hex()[1:3] != got.hex()[3:5] || got.hex()[3:5] != got.hex()[5:7] {
+				t.Errorf("black's %s is %s, not a neutral grey", s.name, got.hex())
+			}
+		}
+	}
+	for _, pick := range []string{"#191047", "#130830", "#0c1a3a"} {
+		c, _ := parseHex(pick)
+		bg := ground(darkBg, c, true)
+		if lightness(bg) > lightness(darkBg)-0.05 {
+			t.Errorf("%s: its page %s is not darker than magpie's %s", pick, bg.hex(), darkBg.hex())
+		}
+		if bg[2]-bg[0] < 8 {
+			t.Errorf("%s: its page %s is not the colour's blue", pick, bg.hex())
+		}
+		// the page's text and the accent read on every ground
+		for _, s := range darkSurfaces {
+			if strings.HasPrefix(s.name, "--line") {
+				continue
+			}
+			g := ground(s.base, c, true)
+			if r := contrast(rgb{0xed, 0xed, 0xf1}, g); r < 7 {
+				t.Errorf("%s: text on %s %s is %.2f:1", pick, s.name, g.hex(), r)
+			}
+		}
+		if r := contrast(accentOn(c, true), bg); r < 4.4 {
+			t.Errorf("%s: accent on its page is %.2f:1", pick, r)
+		}
+	}
+	for _, pick := range []string{"#52525b", "#4f46e5", "#2563eb", "#0d9488", "#16a34a", "#ea580c", "#db2777", "#0000ff"} {
+		c, _ := parseHex(pick)
+		if d := darkness(c); d != 0 {
+			t.Errorf("%s darkens the page by %.2f", pick, d)
+		}
 	}
 }

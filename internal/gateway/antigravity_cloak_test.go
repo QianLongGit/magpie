@@ -21,6 +21,9 @@ const hermesOldSystem = "You are Hermes Agent, an intelligent AI assistant creat
 // on one on 10-27 and 11-14: the line as written, in the system
 // instruction, in any case, and since 11-14 broken up by invisible
 // characters too (fakeGoogle reads past them, as Google's check does).
+// Since the evening of 11-14 "You are Hermes Agent", "You are OpenCode",
+// Codex CLI's line and pi's are turned away too, and Hermes' earlier
+// persona as "You're Hermes Agent, …" with "created by".
 var googleTurnsAway = []string{
 	"x-anthropic-billing-header:",
 	"built on anthropic's claude agent sdk",
@@ -28,7 +31,28 @@ var googleTurnsAway = []string{
 	"you are codex, a coding agent based on gpt-5",
 	"hermes agent, an intelligent ai assistant created by nous research",
 	"rfc 2119 keywords: must, required, should, recommended, may, optional.",
+	"you are hermes agent",
+	"you are opencode",
+	"you are a coding agent running in the codex cli",
+	"a coding assistant running inside pi",
 }
+
+// piDefaultSystem is pi 1.5.0's default system prompt as it builds it
+// (buildSystemPromptSections in dist/core/system-prompt.js, read from the
+// npm package), with its four default tools, an empty skills list and a
+// working directory.
+const piDefaultSystem = "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read the contents of a file\n- bash: Execute a bash command in the current working directory\n- edit: Make precise file edits with exact text replacement\n- write: Create or overwrite files\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /usr/lib/node_modules/@earendil-works/pi/README.md\n</docs>\n\n<cwd>\n/Users/me/project\n</cwd>"
+
+// openCodeSystem is the first line of each of OpenCode 2.0.25's prompts.
+var openCodeSystem = []string{
+	"You are OpenCode, a coding agent that helps users with software engineering tasks.",
+	"You are opencode, an interactive CLI tool that helps users with software engineering tasks.",
+	"You are OpenCode, the best coding agent on the planet.",
+}
+
+// codexCLISystem is how Codex 0.165's prompt for a model it has none of its
+// own for begins.
+const codexCLISystem = "You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI. You are expected to be precise, safe, and helpful."
 
 // zeroWidth is U+200B, what magpie put inside these lines until 11-14.
 const zeroWidth = "\u200b"
@@ -90,9 +114,9 @@ func joinedBy(sep string) func(string) string {
 func unsaid(got string) string {
 	got = regexp.MustCompile(`built on the Claude Agent SDK by Anthropic`).ReplaceAllString(got, "built on Anthropic's Claude Agent SDK")
 	got = regexp.MustCompile(`(?i)built(\s+)on(\s+)gpt-5`).ReplaceAllString(got, "based${1}on${2}GPT-5")
-	got = regexp.MustCompile(`(?i)built(\s+)by(\s+)nous`).ReplaceAllStringFunc(got, func(m string) string {
-		return "created" + strings.TrimPrefix(m, "built")
-	})
+	got = regexp.MustCompile(`(?i)(assistant\s+)built(\s+by\s+nous)`).ReplaceAllString(got, "${1}created${2}")
+	got = regexp.MustCompile(`(?i)\b(you)'re`).ReplaceAllString(got, "${1} are")
+	got = regexp.MustCompile(`running(\s+)within(\s+)pi`).ReplaceAllString(got, "running${1}inside${2}pi")
 	return strings.Replace(got, "key words", "keywords", 1)
 }
 
@@ -129,7 +153,14 @@ func TestAntigravityCloakRewordsEveryLineItTurnsAway(t *testing.T) {
 		"You are Codex, a coding agent based on GPT-5. You and the user share the same workspace.",
 		hermesOldSystem,
 		strings.ToUpper(hermesOldSystem),
+		"You are Hermes Agent, built by Nous Research. Be direct.",
+		"You are Hermes Agent, an intelligent AI assistant created by Nous.",
 		ompLine,
+		piDefaultSystem,
+		openCodeSystem[0],
+		openCodeSystem[1],
+		openCodeSystem[2],
+		codexCLISystem,
 		// twice, and after text whose lower case is longer than it is
 		"İstanbul ✓ " + codexGPT5System + "\n\n" + hermesOldSystem + "\n" + codexGPT5System,
 	} {
@@ -161,12 +192,14 @@ func TestAntigravityCloakRewordsEveryLineItTurnsAway(t *testing.T) {
 	// what Antigravity answers is sent as written, word for word
 	for _, system := range []string{
 		"",
-		"You are opencode, an interactive CLI tool.",
 		"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
 		"You are a Claude agent, built on the Claude Agent SDK by Anthropic.",
 		"You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.",
-		"You are Hermes Agent, built by Nous Research. Be direct.",
-		"You are Hermes Agent, an intelligent AI assistant created by Nous.",
+		"You are Codex, an agent based on GPT-6.",
+		"You're Hermes Agent, built by Nous Research. Be direct.",
+		"You're OpenCode, the best coding agent on the planet.",
+		"You are a coding assistant running within pi, a coding agent harness.",
+		"Hermes Agent, an intelligent AI assistant built by Nous Research.",
 	} {
 		if got := antigravityCloak(system); got != system {
 			t.Errorf("%q went as %q", system, got)
@@ -177,6 +210,20 @@ func TestAntigravityCloakRewordsEveryLineItTurnsAway(t *testing.T) {
 func TestAntigravityHermesHint(t *testing.T) {
 	if antigravityHint(hermesOldSystem) != antigravityHermesHint {
 		t.Error("Hermes' old persona isn't told its own hint")
+	}
+	if antigravityHint("You are Hermes Agent, built by Nous Research.") != antigravityHermesHint {
+		t.Error("Hermes' current persona isn't told its own hint")
+	}
+	for _, c := range []struct{ system, hint string }{
+		{piDefaultSystem, antigravityPiHint},
+		{openCodeSystem[0], antigravityOpenCodeHint},
+		{openCodeSystem[1], antigravityOpenCodeHint},
+		{openCodeSystem[2], antigravityOpenCodeHint},
+		{codexCLISystem, antigravityCodexCLIHint},
+	} {
+		if antigravityHint(c.system) != c.hint {
+			t.Errorf("%.40q isn't told its own hint", c.system)
+		}
 	}
 	if antigravityHint(codexGPT5System) != antigravityCodexHint || antigravityHint(claudeCodeSystem) != antigravityTurnedAwayHint {
 		t.Error("the other prompts lost their hints")
@@ -246,7 +293,7 @@ func TestAntigravityAnswersHermesAndCodexByDefault(t *testing.T) {
 	if code, out := hermesTurn(s, hermesOldSystem); code != 200 || !strings.Contains(out, "from google") {
 		t.Fatalf("Hermes: %d %s", code, out)
 	}
-	if sent != strings.Replace(hermesOldSystem, "created by", "built by", 1) {
+	if sent != strings.Replace(strings.Replace(hermesOldSystem, "created by", "built by", 1), "You are Hermes", "You're Hermes", 1) {
 		t.Fatalf("Hermes' prompt went as %q", sent)
 	}
 	for _, search := range []bool{false, true} {
@@ -273,7 +320,7 @@ func TestAntigravityAnswersHermesAndCodexByDefault(t *testing.T) {
 	if sent != hermesOldSystem {
 		t.Fatalf("sent as written, Hermes' prompt went as %q", sent)
 	}
-	if code != http.StatusBadRequest || !strings.Contains(out, antigravityHermesHint) {
+	if hint, _ := json.Marshal(antigravityHermesHint); code != http.StatusBadRequest || !strings.Contains(out, strings.Trim(string(hint), `"`)) {
 		t.Fatalf("Hermes, as written: %d %s", code, out)
 	}
 	code, out = codexAGPost(s, codexAGTurn(true, false))
@@ -423,5 +470,47 @@ func TestAntigravityCloakLineWrappedOrWidened(t *testing.T) {
 		if got := antigravityCloak(system); got != system {
 			t.Errorf("%q went as %q", system, got)
 		}
+	}
+}
+
+// Codex's GPT-5 line in a user's turn, where a pasted AGENTS.md or a
+// developer message told after a reply puts it, goes to an Antigravity
+// account reworded: since 11-14 Google answers it there with the same bare
+// 429 (3 of 3 on a real account). The model's own turns, the caller's
+// request and every other account keep it as written.
+func TestAntigravityCloaksTheLineInAUsersTurn(t *testing.T) {
+	said := "You were told: " + codexGPT5System
+	// the lines Google let through in a user's turn go as written there
+	others := "x-anthropic-billing-header: cc_version=2.1.316.2e4;\nYou are a Claude agent, built on Anthropic's Claude Agent SDK.\n" + hermesOldSystem + "\nRFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
+	r := &Request{Messages: []Message{
+		{Role: "user", Parts: []Part{{Kind: Text, Text: others}}},
+		{Role: "user", Parts: []Part{{Kind: Text, Text: "hi"}, {Kind: Text, Text: "<system-reminder>\n" + said + "\n</system-reminder>"}}},
+		{Role: "assistant", Parts: []Part{{Kind: Text, Text: said}}},
+		{Role: "user", Parts: []Part{{Kind: Text, Text: said}}},
+	}}
+	ag := provider.Provider{ID: "antigravity", Account: &provider.Account{Agent: "antigravity"}}
+	b := string(codeAssistBody(ag, r, "gemini-3-flash", nil))
+	if n := strings.Count(b, "based on GPT-5"); n != 1 {
+		t.Fatalf("Antigravity's account was sent the line %d times, want once (the model's turn): %s", n, b)
+	}
+	if n := strings.Count(b, "built on GPT-5"); n != 2 {
+		t.Fatalf("the user's turns went reworded %d times, want 2: %s", n, b)
+	}
+	if !strings.Contains(b, `"text":`+string(mustJSON(others))) {
+		t.Fatalf("lines Google lets through in a user's turn were changed: %s", b)
+	}
+	for i, m := range r.Messages[1:] {
+		if !strings.Contains(m.Parts[len(m.Parts)-1].Text, "based on GPT-5") {
+			t.Fatalf("the caller's message %d was changed: %+v", i, m)
+		}
+	}
+	gemini := provider.Provider{ID: "gemini-cli", Account: &provider.Account{Agent: "gemini"}}
+	if b := string(codeAssistBody(gemini, r, "gemini-3-flash", nil)); strings.Count(b, "based on GPT-5") != 3 {
+		t.Fatalf("Gemini CLI's account was sent %s", b)
+	}
+	asWritten := ag
+	asWritten.PromptAsWritten = true
+	if b := string(codeAssistBody(asWritten, r, "gemini-3-flash", nil)); strings.Count(b, "based on GPT-5") != 3 {
+		t.Fatalf("prompt=as-written was sent %s", b)
 	}
 }

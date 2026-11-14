@@ -1565,16 +1565,23 @@ function routingPage(part) {
   // what it adds to the same 429 for Codex's own GPT-5 system prompt, which
   // a thread begun on a GPT model keeps after a switch (antigravityCodexHint)
   const AG_CODEX = "Antigravity answers this 429 to Codex's own system prompt for GPT-5 models whatever quota is left, so it is not a quota and waiting won't help; a Codex chat begun on a GPT model keeps that prompt after a model switch or a fork, so start a new chat on this model";
-  // what it adds to the same 429 for Hermes Agent's earlier default persona
-  // (antigravityHermesHint)
-  const AG_HERMES = "Antigravity answers this 429 to Hermes Agent's earlier default persona (its SOUL.md) whatever quota is left, so it is not a quota and waiting won't help; Hermes' current default persona goes through, so put it in SOUL.md, or use another provider for these chats";
+  // what it adds to the same 429 for Hermes Agent's persona, today's or the
+  // earlier one (antigravityHermesHint)
+  const AG_HERMES = "Antigravity answers this 429 to Hermes Agent's default persona (\"You are Hermes Agent, …\" in its SOUL.md), the current one and the earlier one alike, whatever quota is left, so it is not a quota and waiting won't help; magpie sends it as \"You're Hermes Agent, …\", which goes through, so start SOUL.md another way, or use another provider for these chats";
+  // ... for OpenCode's prompts (antigravityOpenCodeHint)
+  const AG_OPENCODE = "Antigravity answers this 429 to OpenCode's system prompt (\"You are OpenCode, …\") whatever quota is left, so it is not a quota and waiting won't help; magpie sends that line as \"You're OpenCode, …\", which goes through, so use another provider for these chats, or put one after Antigravity in a routing group";
+  // ... for Codex's prompt for a model it has none of its own for
+  // (antigravityCodexCLIHint)
+  const AG_CODEX_CLI = "Antigravity answers this 429 to Codex's prompt for a model it has none of its own for (\"You are a coding agent running in the Codex CLI\") whatever quota is left, so it is not a quota and waiting won't help; magpie sends that line as \"You're …\", which goes through, so use another provider for these chats, or put one after Antigravity in a routing group";
+  // ... for pi's default prompt (antigravityPiHint)
+  const AG_PI = "Antigravity answers this 429 to pi's default system prompt (\"You are a coding assistant running inside pi\") whatever quota is left, so it is not a quota and waiting won't help; magpie sends that line as \"running within pi\", which goes through, so give pi a system prompt of your own (--system-prompt) or use another provider for these chats";
   // what it adds to the same 429 for oh-my-pi's RFC 2119 line
   // (antigravityRFCHint)
   const AG_RFC = "Antigravity answers this 429 to the line \"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\" that starts oh-my-pi (omp)'s system prompt, and to any prompt that has it, whatever quota is left, so it is not a quota and waiting won't help; magpie sends that line as \"RFC 2119 key words: …\", which goes through, so this one came from a copy of it that was worded another way";
   // what it adds to WorkBuddy's 403 11140 for an account it restricted
   // (provider.WBRestrictedHint, #1849)
   const WB_RESTRICTED = "WorkBuddy restricted this account for unusual activity; it stays out until WorkBuddy lifts that, which an appeal (Submit feedback in WorkBuddy) asks for";
-  const HINTS = [WB_REFUSED, BLOCKED, ZCODE_BLOCKED, AG_TURNED_AWAY, AG_CODEX, AG_HERMES, AG_RFC, WB_RESTRICTED];
+  const HINTS = [WB_REFUSED, BLOCKED, ZCODE_BLOCKED, AG_TURNED_AWAY, AG_CODEX, AG_HERMES, AG_OPENCODE, AG_CODEX_CLI, AG_PI, AG_RFC, WB_RESTRICTED];
 
   function trySaid(r, i) {
     const tr = r.tries[i], w = tried(r, tr), agent = agentName(r.agent);
@@ -4182,10 +4189,14 @@ function routingPage(part) {
           const { prompt, read } = promptOf(r);
           if (prompt) { s.prompt += prompt; s.read += read; s.cached++; }
           const d = !noAnswer(outcome(r)[1]) && decodeOf(r, r.ms, r.ttft, r.firstText);
-          if (d) { s.decodeMs += d.w; s.decodeOut += d.n; s.timed++; }
+          // the same replies over their whole time too, the wait for the
+          // first token and the reasoning in: what a tool that times the
+          // whole request reads (@verymoes on X: CC Switch's ≈77 and
+          // opencode's 76.7 beside this 142)
+          if (d) { s.decodeMs += d.w; s.decodeOut += d.n; s.timed++; s.wholeMs += r.ms; s.wholeOut += r.out; }
         }
         return s;
-      }, { cost: 0, tokens: 0, priced: 0, unpriced: 0, running: 0, completed: 0, prompt: 0, read: 0, cached: 0, decodeMs: 0, decodeOut: 0, timed: 0 });
+      }, { cost: 0, tokens: 0, priced: 0, unpriced: 0, running: 0, completed: 0, prompt: 0, read: 0, cached: 0, decodeMs: 0, decodeOut: 0, timed: 0, wholeMs: 0, wholeOut: 0 });
       setText(x.arrow, open ? "▾" : "▸");
       // Background workers have their own IDs. Label groups made entirely
       // for one purpose without renaming a chat that also made helper calls.
@@ -4231,7 +4242,8 @@ function routingPage(part) {
       if (g.key && visibleMetrics.includes("cache") && total.prompt) meta.push(metricElement(["cache-hit", "Avg. cache", hitPct(total.read / total.prompt),
         t("Total cache reads divided by total prompt tokens; larger prompts carry more weight") + "\n" + coverage(total.cached)]));
       if (g.key && visibleMetrics.includes("speed") && total.decodeMs) meta.push(metricElement(["speed", "Avg. speed", t("{n} tok/s", { n: Math.round(total.decodeOut * 1000 / total.decodeMs) }),
-        t("Total output tokens divided by total decode time; excludes waiting and replies without usable timing") + ". " + t("A reply that reasoned counts only its answer, from its first text: the reasoning was written before the stream showed it") + ". " + t("No answer text: speed includes reasoning only when visible reasoning streamed; hidden reasoning has no speed") + "\n" + coverage(total.timed)]));
+        tipLines(t("Total output tokens divided by the time from each reply's first token to its end; the wait for the first token, and replies without usable timing, are left out") + ". " + t("A reply that reasoned counts only its answer, from its first text: the reasoning was written before the stream showed it") + ". " + t("No answer text: speed includes reasoning only when visible reasoning streamed; hidden reasoning has no speed"),
+          total.wholeMs ? t("Over each request's whole time, the wait for the first token and the reasoning counted: {n} tok/s", { n: Math.round(total.wholeOut * 1000 / total.wholeMs) }) : "", coverage(total.timed))]));
       const metaSig = JSON.stringify([bits, tokenHelp, meta.map((e) => [e.textContent, e.title])]);
       if (x.meta.dataset.sig !== metaSig) { x.meta.replaceChildren(...meta); x.meta.dataset.sig = metaSig; }
       const credits = routeCredits(g.rows);

@@ -58,14 +58,14 @@ func lookKey(s settings.Settings) string {
 func lookCSS(s settings.Settings) string {
 	var b strings.Builder
 	if c, ok := parseHex(s.Accent); ok {
-		light := accentVars(c, false) + ";" + tintVars(c, lightSurfaces, lightTint)
-		dark := accentVars(c, true) + ";" + tintVars(c, darkSurfaces, darkTint) + ";" + popVar(c)
+		light := accentVars(c, false) + ";" + tintVars(c, lightSurfaces, false)
+		dark := accentVars(c, true) + ";" + tintVars(c, darkSurfaces, true) + ";" + popVar(c)
 		fmt.Fprintf(&b, "html:not(.omarchy):root{%s}\n", light)
 		fmt.Fprintf(&b, "@media (prefers-color-scheme: dark){html:not(.omarchy):root:not([data-theme=\"light\"]){%s}}\n", dark)
 		fmt.Fprintf(&b, "html:not(.omarchy):root[data-theme=\"dark\"]{%s}\n", dark)
 		// the tray panel draws its surfaces on body.panel, so they are
 		// tinted there too, the frosted panel's tint (tintPanel) with them
-		lightP, darkP := tintVars(c, lightPanelSurfaces, lightTint), tintVars(c, darkPanelSurfaces, darkTint)
+		lightP, darkP := tintVars(c, lightPanelSurfaces, false), tintVars(c, darkPanelSurfaces, true)
 		fmt.Fprintf(&b, "@media (prefers-color-scheme: light){html:not(.omarchy):root:not([data-theme=\"dark\"]) body.panel{%s}}\n", lightP)
 		fmt.Fprintf(&b, "html:not(.omarchy):root[data-theme=\"light\"] body.panel{%s}\n", lightP)
 		fmt.Fprintf(&b, "@media (prefers-color-scheme: dark){html:not(.omarchy):root:not([data-theme=\"light\"]) body.panel{%s}}\n", darkP)
@@ -154,9 +154,9 @@ var (
 // tinted with c.
 func accentOn(c rgb, dark bool) rgb {
 	if dark {
-		return inkOn(c, white, darkCard, tint(darkCard, c, darkTint), tint(darkBg, c, darkTint))
+		return inkOn(lifted(c, true), white, darkCard, ground(darkCard, c, true), ground(darkBg, c, true))
 	}
-	return inkOn(c, black, lightBg, tint(lightBg, c, lightTint))
+	return inkOn(lifted(c, false), black, lightBg, ground(lightBg, c, false))
 }
 
 // inkOn is c moved toward toward just enough to read as text on each of
@@ -195,11 +195,12 @@ func accentVars(c rgb, dark bool) string {
 	}
 	soft, sel := white.mix(a, 0.09), white.mix(a, 0.11)
 	fill := white.mix(a, 0.12)
-	mark := inkOn(c, black, lightPick, tint(lightPick, c, lightTint), fill)
+	mark := inkOn(lifted(c, false), black, lightPick, ground(lightPick, c, false), fill)
 	if dark {
-		soft, sel = darkBg.mix(a, 0.14), darkBg.mix(a, 0.2)
-		fill = darkFill.mix(a, 0.26)
-		mark = inkOn(c, white, darkPick, tint(darkPick, c, darkTint), fill)
+		bg := ground(darkBg, c, true)
+		soft, sel = bg.mix(a, 0.14), bg.mix(a, 0.2)
+		fill = ground(darkFill, c, true).mix(a, 0.26)
+		mark = inkOn(lifted(c, true), white, darkPick, ground(darkPick, c, true), fill)
 	}
 	return fmt.Sprintf("--accent:%s;--accent-soft:%s;--accent-fg:%s;--sel:%s;--mark:%s;--mark-fill:%s", a.hex(), soft.hex(), fg.hex(), sel.hex(), mark.hex(), fill.hex())
 }
@@ -239,19 +240,104 @@ func tint(base, c rgb, k float64) rgb {
 	return out
 }
 
-// tintVars are surfaces tinted with c's hue, the theme's grounds once the user picked a colour of
-// their own. Without one each keeps app.css's grey.
-func tintVars(c rgb, surfaces []surface, k float64) string {
+// depth is how far past the dark theme's background c is toward black,
+// 0 for a colour as light as it or lighter, 1 for black, where lifted
+// starts its ink (CHENGJIAHEGOXIS on X: black's ink was Graphite's grey,
+// 「尤其是黑色始终一直是灰色」). On the light theme, the same for a pick
+// lighter than its background, toward white. The dark grounds go down by
+// darkness, which reads a colour's lightness as the eye does.
+func depth(c rgb, dark bool) float64 {
+	g := (c[0] + c[1] + c[2]) / 3
+	if dark {
+		ref := (darkBg[0] + darkBg[1] + darkBg[2]) / 3
+		return max(0, ref-g) / ref
+	}
+	ref := (lightBg[0] + lightBg[1] + lightBg[2]) / 3
+	return max(0, g-ref) / (255 - ref)
+}
+
+// lightness is c's OKLab lightness, 0 for black and 1 for white: how
+// light a colour looks, whatever its hue. A deep navy's mean channel is
+// as high as the dark theme's grey, but it looks far darker than it.
+func lightness(c rgb) float64 {
+	lin := func(v float64) float64 {
+		v /= 255
+		if v <= 0.04045 {
+			return v / 12.92
+		}
+		return math.Pow((v+0.055)/1.055, 2.4)
+	}
+	r, g, b := lin(c[0]), lin(c[1]), lin(c[2])
+	l := math.Cbrt(0.4122214708*r + 0.5363325363*g + 0.0514459929*b)
+	m := math.Cbrt(0.2119034982*r + 0.6806995451*g + 0.1073969566*b)
+	s := math.Cbrt(0.0883024619*r + 0.2817188376*g + 0.6299787005*b)
+	return 0.2104542553*l + 0.7936177850*m - 0.0040720468*s
+}
+
+// darkLight is the lightness under which a pick is a dark colour, one
+// the dark theme's grounds go down toward: Graphite (#52525b) and every
+// preset are lighter, a deep navy or a near black are darker.
+const darkLight = 0.4
+
+// darkness is how far c is toward black past darkLight: 0 for Graphite
+// or any lighter colour, 1 for black (CHENGJIAHEGOXIS on X: the darkest
+// navy of the system's picker drew the same grey page as Graphite, 「感觉
+// 是有浅灰存在，所以导致深变浅」).
+func darkness(c rgb) float64 {
+	return max(0, darkLight-lightness(c)) / darkLight
+}
+
+// ground is one of the theme's grounds once c is picked: tinted with c's
+// hue, and, on the dark theme, as much darker as c is a dark colour
+// (darkness), so black draws a black page with its cards, menus and
+// lines the same steps above it, and a deep navy a near-black navy one.
+// As it goes down the ground loses app.css's own cool grey, so black's
+// page is #000000, Chrome's and the system's black, not a blue-black
+// (「纯黑……感觉色对不上」), and the pick's hue counts for more, so a dark
+// colour's page is that colour's and not grey. The light theme's grounds
+// keep their lightness: a white pick there would melt its white cards
+// into the page.
+func ground(base, c rgb, dark bool) rgb {
+	if !dark {
+		return tint(base, c, lightTint)
+	}
+	d := darkness(c)
+	mean := (base[0] + base[1] + base[2]) / 3
+	out := tint(base.mix(rgb{mean, mean, mean}, d), c, darkTint+d*0.25)
+	step := d * (darkBg[0] + darkBg[1] + darkBg[2]) / 3
+	for i := range out {
+		out[i] = max(0, out[i]-step)
+	}
+	return out
+}
+
+// lifted is where c's ink starts on a theme: c itself, or, for a pick
+// past the theme's background (black on the dark theme, white on the
+// light one), most of the way to the other end, so black reads as the
+// dark theme's light ink and not as a grey that is Graphite's (and white
+// as the light theme's dark ink). A colour that reads as it is starts
+// as it is.
+func lifted(c rgb, dark bool) rgb {
+	if dark {
+		return c.mix(white, 0.88*depth(c, true))
+	}
+	return c.mix(black, 0.88*depth(c, false))
+}
+
+// tintVars are surfaces as ground draws them, the theme's grounds once
+// the user picked a colour of their own. Without one each keeps app.css's
+// grey.
+func tintVars(c rgb, surfaces []surface, dark bool) string {
 	parts := make([]string, 0, len(surfaces))
 	for _, s := range surfaces {
-		parts = append(parts, s.name+":"+tint(s.base, c, k).hex())
+		parts = append(parts, s.name+":"+ground(s.base, c, dark).hex())
 	}
 	return strings.Join(parts, ";")
 }
 
 // popVar is the dark theme's menu ground, tinted as its other grounds are.
 func popVar(c rgb) string {
-	p := tint(darkPop, c, darkTint)
+	p := ground(darkPop, c, true)
 	return fmt.Sprintf("--pop-bg:rgba(%d,%d,%d,.96)", int(math.Round(p[0])), int(math.Round(p[1])), int(math.Round(p[2])))
 }
 
