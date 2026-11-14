@@ -18,7 +18,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, settingsDrawn, openPart } = require("./reader.cjs");
+const { watchSettingsReads, settingsDrawn, openPart, wheelTo } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -109,8 +109,13 @@ for (const engine of engines) {
         await page.waitForFunction((e) => e.getBoundingClientRect().height <= 4, await hint.elementHandle());
 
         // the pointer resting on the row: a card with the whole line, and
-        // nothing moves
-        await mcp.evaluate((e) => e.scrollIntoView({ block: "center" }));
+        // nothing moves. The row is brought into sight the way a reader
+        // goes, with the wheel: a programmatic scrollIntoView is pulled
+        // back by the reader-place guard ("A click never moves"), and the
+        // row it leaves below the first screen then moves under the
+        // pointer and takes the card (the Vision route row made this
+        // row's leave the screen at ja/de 420)
+        await wheelTo(page, mcp.locator(":scope > .who > .name"), 300);
         await page.mouse.move(1, 1);
         const before = await page.evaluate(boxes);
         await mcp.locator(":scope > .who > .name").hover();

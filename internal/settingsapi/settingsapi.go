@@ -46,7 +46,7 @@ var Keys = []string{
 	"workbuddyCheckin", "traeCheckin", "minimaxCheckin", "qoderCheckin", "checkinAt",
 	// models: replies, vision, images, search
 	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudeNoExtraUsage", "claudePrintMode", "refusalRetries", "retryAfterCap",
-	"vision", "visionEffort", "imageGen", "videoGen", "imageTimeout", "classifyTimeout",
+	"vision", "visionEffort", "imageGen", "videoGen", "imageTimeout", "classifyTimeout", "visionRoute",
 	// what every routing group does that says nothing of its own
 	"groupSink", "groupFirstToken", "groupPatience",
 	"searcher", "searcherThen", "searcherEffort", "searchFirst",
@@ -213,6 +213,11 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	// nor the video model, picked in its own row
 	if _, sent := fields["videoGen"]; !sent {
 		in.VideoGen = cur.VideoGen
+	}
+	// nor where a request whose latest message carries an image is routed
+	// to, picked in its own row (the cc-switch fork's vision routing)
+	if _, sent := fields["visionRoute"]; !sent {
+		in.VisionRouteModel = cur.VisionRouteModel
 	}
 	if _, sent := fields["imageTimeout"]; !sent {
 		in.ImageTimeout = cur.ImageTimeout

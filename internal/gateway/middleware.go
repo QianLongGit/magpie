@@ -11,6 +11,7 @@ import (
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -45,6 +46,11 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 	}
 	w, body, hooked := gatewayHooks(w, r, from, body)
 	defer hooked()
+	// 视觉路由（内置，visionroute.go）：最新 user 消息带图的 Anthropic
+	// 请求改写到 Settings › Models › Images 配的模型，在任何路由决策
+	// 之前——放在 JS 中间件链外，零插件的全新环境也在；旧视觉路由
+	// 中间件退役前仍可在此之上再改写
+	body = visionRoute(from, body, settings.Shared().VisionRouteModel)
 	agents := gwmw.AgentsWanted(middlewareWanted)
 	if len(agents) == 0 {
 		s.serve(w, r, from, body)
