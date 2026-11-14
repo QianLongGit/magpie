@@ -22,8 +22,8 @@ const projectUsage = `usage:
                                         group: the group's ref group/<id> goes into the project's own
                                         .claude/settings.local.json, every model Claude Code picks
                                         through it; make the group first (magpie group add)
-  magpie project unbind <path>          take the pins back out and forget the binding (the file as it
-                                        was before the first bind stays kept in projects.json)
+  magpie project unbind <path>          take the pins back out and forget the binding: the whole row goes,
+                                        its pre-bind snapshot with it
   magpie projects                       the bound projects, and whether each one's pins are still in
                                         place (a group gone takes its bindings with it)
 `
@@ -73,14 +73,14 @@ func projectBind(path, ref string) error {
 }
 
 // projectUnbind 先清 pin、成功后才删绑定行（次序红线：清不动的行留着
-// 下次再试）；快照按双 map 裁决随表保留，是解绑的后悔药。
+// 下次再试）；删行是整行删，快照随行走。
 func projectUnbind(path string) error {
 	root := agent.ProjectRoot(path)
 	m, err := agent.ProjectBindings()
 	if err != nil {
 		return err
 	}
-	ref, ok := m[root]
+	b, ok := m[root]
 	if !ok {
 		return fmt.Errorf("%s (rooted at %s) is not bound; magpie projects lists what is", path, root)
 	}
@@ -91,8 +91,8 @@ func projectUnbind(path string) error {
 	if err := agent.SaveProjectBindings(m); err != nil {
 		return err
 	}
-	fmt.Println(green.Render("✓"), filepath.Base(root), "unpinned from", bold.Render(ref))
-	fmt.Println(" ", muted.Render("its pins are out of settings.local.json; the file as it was before binding stays kept in projects.json"))
+	fmt.Println(green.Render("✓"), filepath.Base(root), "unpinned from", bold.Render(b.Group))
+	fmt.Println(" ", muted.Render("its pins are out of settings.local.json and the binding row, snapshot with it, is gone"))
 	return nil
 }
 
@@ -116,10 +116,10 @@ func projectsList() error {
 	nameW, refW := 0, 0
 	for _, root := range roots {
 		sync := green.Render("in place")
-		if agent.ProjectSync(root, m[root]) == agent.ProjectOutOfSync {
+		if agent.ProjectSync(root, m[root].Group) == agent.ProjectOutOfSync {
 			sync = amber.Render("out of sync") + muted.Render(" · magpie project bind again")
 		}
-		r := row{base: filepath.Base(root), ref: m[root], sync: sync}
+		r := row{base: filepath.Base(root), ref: m[root].Group, sync: sync}
 		rows = append(rows, r)
 		nameW = max(nameW, len(r.base))
 		refW = max(refW, len(r.ref))

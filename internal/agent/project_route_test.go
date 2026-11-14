@@ -24,19 +24,19 @@ func sandboxProjects(t *testing.T) string {
 }
 
 // =====================================================================
-// 绑定表 projects.json：key = ProjectRoot 的规范化路径，value = 组的
-// 完整 ref（group/<id>）。快照是另一半 map（root -> 写前原文），与绑定
-// 行解耦：删绑定行保快照，Save 只写 bindings 半边。
+// 绑定表 projects.json：key = ProjectRoot 的规范化路径，value = 绑定行
+// ProjectBinding{Group, Snapshot}——组 ref 与写前快照存在同一行里，快
+// 照随绑定行删除（解绑/级联删行 = 快照同生命周期消失）。
 // =====================================================================
 
-// TestProjectBindingsSaveAndLoadBack: 存两条（含中文路径）读回相等，
-// 文件落在 settings.Dir() 下。
+// TestProjectBindingsSaveAndLoadBack: 存两条（含中文路径，一条带快照）
+// 读回相等，文件落在 settings.Dir() 下。
 func TestProjectBindingsSaveAndLoadBack(t *testing.T) {
 	path := sandboxProjects(t)
 	cn := filepath.Join(t.TempDir(), "中文项目")
-	m := map[string]string{
-		filepath.Join(t.TempDir(), "proj-a"): "group/proj-a",
-		cn:                                   "group/中文组",
+	m := map[string]ProjectBinding{
+		filepath.Join(t.TempDir(), "proj-a"): {Group: "group/proj-a"},
+		cn:                                   {Group: "group/中文组", Snapshot: "原文"},
 	}
 	if err := SaveProjectBindings(m); err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestProjectBindingsSaveAndLoadBack(t *testing.T) {
 	}
 	for k, v := range m {
 		if got[k] != v {
-			t.Fatalf("binding %q = %q, want %q", k, got[k], v)
+			t.Fatalf("binding %q = %+v, want %+v", k, got[k], v)
 		}
 	}
 }
@@ -84,7 +84,7 @@ func TestProjectBindingsUnparsableKeptAside(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m := map[string]string{"/proj": "group/x"}
+	m := map[string]ProjectBinding{"/proj": {Group: "group/x"}}
 	if err := SaveProjectBindings(m); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestProjectBindingsUnparsableKeptAside(t *testing.T) {
 		t.Fatalf("kept-aside copy = %q (err %v), want the original bytes", b, err)
 	}
 	got, err := ProjectBindings()
-	if err != nil || got["/proj"] != "group/x" {
+	if err != nil || got["/proj"].Group != "group/x" {
 		t.Fatalf("after save, read back %v (err %v), want the saved binding", got, err)
 	}
 }
@@ -113,56 +113,57 @@ func TestProjectBindingsMissingFileReadsAsNone(t *testing.T) {
 	}
 }
 
-// TestProjectBindingsSaveKeepsSnapshots: Save 只写 bindings 半边——删掉
-// 一条绑定行，快照半边原样保留（删行保快照，双 map 解耦）。
-func TestProjectBindingsSaveKeepsSnapshots(t *testing.T) {
+// TestProjectBindingsSaveDropsARowWithItsSnapshot: 删一条绑定行 = 该行
+// 的快照同生命周期消失（row-delete 终裁）。文件直读断言：被删的 root
+// 整行不在了，留下的行其快照还在。
+func TestProjectBindingsSaveDropsARowWithItsSnapshot(t *testing.T) {
 	path := sandboxProjects(t)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	orig := `{"bindings":{"/a":"group/x","/b":"group/y"},"snapshots":{"/a":"原文 A","/b":"原文 B"}}`
+	orig := `{"/a":{"group":"group/x","snapshot":"原文 A"},"/b":{"group":"group/y","snapshot":"原文 B"}}`
 	if err := os.WriteFile(path, []byte(orig), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// 只剩 /b 一条绑定：/a 的行被删，它的快照必须还在
-	if err := SaveProjectBindings(map[string]string{"/b": "group/y"}); err != nil {
+	// 只剩 /b 一条绑定：/a 的行被删，它的快照必须随行消失
+	if err := SaveProjectBindings(map[string]ProjectBinding{"/b": {Group: "group/y", Snapshot: "原文 B"}}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f struct {
-		Bindings  map[string]string `json:"bindings"`
-		Snapshots map[string]string `json:"snapshots"`
-	}
+	var f map[string]ProjectBinding
 	if err := json.Unmarshal(b, &f); err != nil {
-		t.Fatalf("saved file is not JSON: %v (%s)", err, b)
+		t.Fatalf("saved file is not a binding table: %v (%s)", err, b)
 	}
-	if f.Bindings["/a"] != "" || f.Bindings["/b"] != "group/y" {
-		t.Fatalf("bindings after save = %v, want only /b", f.Bindings)
+	if _, ok := f["/a"]; ok {
+		t.Fatalf("row /a survived the save: %v, want it and its snapshot gone", f)
 	}
-	if f.Snapshots["/a"] != "原文 A" || f.Snapshots["/b"] != "原文 B" {
-		t.Fatalf("snapshots after save = %v, want both kept", f.Snapshots)
+	if f["/b"].Group != "group/y" || f["/b"].Snapshot != "原文 B" {
+		t.Fatalf("row /b = %+v, want its group and snapshot kept", f["/b"])
+	}
+	if strings.Contains(string(b), "原文 A") {
+		t.Fatalf("the dropped row's snapshot outlived it: %s", b)
 	}
 }
 
-// TestProjectBindingsOrphanSnapshotReadsFine: 只有快照没有绑定的文件是
-// 已知可控形态（解绑后的后悔药），读取不报错。
-func TestProjectBindingsOrphanSnapshotReadsFine(t *testing.T) {
+// TestProjectBindingsReadARowWithItsSnapshot: 快照是绑定行的字段（schema
+// 事实）：行在，Group 与 Snapshot 一起读回。
+func TestProjectBindingsReadARowWithItsSnapshot(t *testing.T) {
 	path := sandboxProjects(t)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(`{"snapshots":{"/gone":"旧文"}}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"/p":{"group":"group/x","snapshot":"写前原文"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	m, err := ProjectBindings()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m) != 0 {
-		t.Fatalf("orphan-snapshot file read as bindings %v, want none", m)
+	if m["/p"].Group != "group/x" || m["/p"].Snapshot != "写前原文" {
+		t.Fatalf("row read back %+v, want group group/x with its snapshot", m["/p"])
 	}
 }
 
@@ -193,19 +194,19 @@ func pinProject(t *testing.T) string {
 	return root
 }
 
-// readProjectsTable 读回 projects.json 的两个半边（同包直读，schema 即
-// 契约）。
-func readProjectsTable(t *testing.T) projectFile {
+// readProjectsTable 读回 projects.json 的绑定表（同包直读，schema 即契
+// 约：map[root]ProjectBinding）。
+func readProjectsTable(t *testing.T) map[string]ProjectBinding {
 	t.Helper()
 	b, err := os.ReadFile(projectsPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f projectFile
-	if err := json.Unmarshal(b, &f); err != nil {
+	var m map[string]ProjectBinding
+	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("projects.json unreadable: %v (%s)", err, b)
 	}
-	return f
+	return m
 }
 
 // readLocalEnv 解析项目的 settings.local.json，返回 env 对象。
@@ -241,11 +242,11 @@ func TestPinsCreateMinimalStructureWhenFileMissing(t *testing.T) {
 		t.Fatalf("env.%s = %v, want %d (fallback window)", claudeContextEnv, env[claudeContextEnv], settings.WorkingWindow)
 	}
 	f := readProjectsTable(t)
-	if f.Bindings[root] != "group/proj-x" {
-		t.Fatalf("binding row = %v, want group/proj-x", f.Bindings)
+	if f[root].Group != "group/proj-x" {
+		t.Fatalf("binding row = %+v, want group/proj-x", f[root])
 	}
-	if f.Snapshots[root] != "" {
-		t.Fatalf("snapshot = %q, want none (no file was there)", f.Snapshots[root])
+	if f[root].Snapshot != "" {
+		t.Fatalf("snapshot = %q, want none (no file was there)", f[root].Snapshot)
 	}
 }
 
@@ -284,8 +285,9 @@ func TestPinsKeepUsersOtherEnvAndTopLevelKeys(t *testing.T) {
 	}
 }
 
-// TestPinsRebindingRollsSnapshot: 每次写前滚动单份快照（fork
-// set_backs_up_existing_file_once_per_write 的 REPLACE 语义）。
+// TestPinsRebindingRollsSnapshot: 每次写前滚动单份快照存进行内（fork
+// set_backs_up_existing_file_once_per_write 的 REPLACE 语义）——同项目
+// rebind 用当前文件内容覆盖该行 Snapshot。
 func TestPinsRebindingRollsSnapshot(t *testing.T) {
 	root := pinProject(t)
 	p := localSettingsPath(root)
@@ -299,7 +301,7 @@ func TestPinsRebindingRollsSnapshot(t *testing.T) {
 	if err := WriteProjectPins(root, "group/a"); err != nil {
 		t.Fatal(err)
 	}
-	if got := readProjectsTable(t).Snapshots[root]; got != p1 {
+	if got := readProjectsTable(t)[root].Snapshot; got != p1 {
 		t.Fatalf("snapshot after first bind = %q, want %q", got, p1)
 	}
 	p2 := `{"env":{"ANTHROPIC_API_KEY":"two"},"model":"x"}`
@@ -309,7 +311,7 @@ func TestPinsRebindingRollsSnapshot(t *testing.T) {
 	if err := WriteProjectPins(root, "group/a"); err != nil {
 		t.Fatal(err)
 	}
-	if got := readProjectsTable(t).Snapshots[root]; got != p2 {
+	if got := readProjectsTable(t)[root].Snapshot; got != p2 {
 		t.Fatalf("snapshot after rebind = %q, want %q (rolled)", got, p2)
 	}
 }
@@ -328,7 +330,7 @@ func TestPinsCorruptFileSnapshottedThenRebuilt(t *testing.T) {
 	if err := WriteProjectPins(root, "group/proj-x"); err != nil {
 		t.Fatal(err)
 	}
-	if got := readProjectsTable(t).Snapshots[root]; got != "not json{" {
+	if got := readProjectsTable(t)[root].Snapshot; got != "not json{" {
 		t.Fatalf("corrupt original not snapshotted: %q", got)
 	}
 	env := readLocalEnv(t, root)
@@ -402,8 +404,8 @@ func TestClearDropsEveryPinKeyKeepsTheRest(t *testing.T) {
 	if !strings.Contains(string(after), "Bash(ls:*)") {
 		t.Fatalf("permissions lost after clear: %s", after)
 	}
-	// 写前滚动快照：清的是「全 pin + 用户键」的原文
-	if got := readProjectsTable(t).Snapshots[root]; !strings.Contains(got, "user-key") {
+	// 写前滚动快照存进行内：清的是「全 pin + 用户键」的原文
+	if got := readProjectsTable(t)[root].Snapshot; !strings.Contains(got, "user-key") {
 		t.Fatalf("pre-clear snapshot = %q, want the file as it was (with user-key)", got)
 	}
 }
@@ -628,8 +630,8 @@ func TestProjectRootNormalizesTheWindowsDriveLetter(t *testing.T) {
 // =====================================================================
 // 组变化级联：provider 的组写入单点（store 成功后）fire GroupsChanged，
 // agent 侧 DropGoneProjectBindings 把悬空绑定清掉。次序红线：先清 pin
-// （幂等），成功后才删绑定行；清 pin 失败留行待下次重试。快照按双 map
-// 裁决保留（删行保快照）。
+// （幂等），成功后才删绑定行；清 pin 失败留行待下次重试。删行 = 整条
+// ProjectBinding 删，快照随行走。
 // =====================================================================
 
 // realGroupProject 沙箱里造「真组 + 项目绑定 + pin 文件」的完整状态，
@@ -656,15 +658,13 @@ func realGroupProject(t *testing.T, id string) string {
 	return root
 }
 
-// goneAsserts 断言 root 的绑定行已删、快照保留、pin 键全无而用户键原样。
+// goneAsserts 断言 root 的绑定行整条已删（快照随行消失，无残留）、pin
+// 键全无而用户键原样。
 func goneAsserts(t *testing.T, root string) {
 	t.Helper()
 	f := readProjectsTable(t)
-	if _, ok := f.Bindings[root]; ok {
-		t.Fatalf("binding row for %s still there after its group is gone", root)
-	}
-	if f.Snapshots[root] == "" {
-		t.Fatalf("snapshot of %s went with the row; the dual-map ruling keeps it", root)
+	if _, ok := f[root]; ok {
+		t.Fatalf("binding row for %s still there after its group is gone: %+v", root, f[root])
 	}
 	env := readLocalEnv(t, root)
 	for _, k := range append(append([]string{}, wantPinEnv...), claudeContextEnv) {
@@ -677,8 +677,8 @@ func goneAsserts(t *testing.T, root string) {
 	}
 }
 
-// TestGoneDeletingAGroupDropsItsProjectBindings: 自建组真删 → 级联删行、
-// 清 pin、保快照（用户其他键原样）。
+// TestGoneDeletingAGroupDropsItsProjectBindings: 自建组真删 → 级联整行
+// 删（快照随之）、清 pin（用户其他键原样）。
 func TestGoneDeletingAGroupDropsItsProjectBindings(t *testing.T) {
 	root := realGroupProject(t, "proj-x")
 	if err := edit.SetJSON(localSettingsPath(root), edit.KV{Path: "env.ANTHROPIC_API_KEY", Value: "user-key"}); err != nil {
@@ -736,7 +736,7 @@ func TestGoneALiveGroupsBindingStays(t *testing.T) {
 	if dropped := DropGoneProjectBindings(); len(dropped) != 0 {
 		t.Fatalf("a live group's binding dropped: %v", dropped)
 	}
-	if got := readProjectsTable(t).Bindings[root]; got != "group/proj-live" {
+	if got := readProjectsTable(t)[root].Group; got != "group/proj-live" {
 		t.Fatalf("live binding = %q, want group/proj-live", got)
 	}
 	if s := ProjectSync(root, "group/proj-live"); s != ProjectSynced {
@@ -759,8 +759,13 @@ func TestGoneAFailedPinClearKeepsTheBinding(t *testing.T) {
 	if err := provider.DeleteGroup("proj-f"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := readProjectsTable(t).Bindings[root]; !ok {
+	row := readProjectsTable(t)[root]
+	if row.Group == "" {
 		t.Fatal("a failed pin clear dropped the row: dead pins would stay forever, unseen by the row-driven reconcile")
+	}
+	// 清理失败留行的场合，快照随行留（Clear 写前快照进了行，行没删）
+	if row.Snapshot == "" {
+		t.Fatal("the kept row lost its snapshot while it stayed")
 	}
 	if dropped := DropGoneProjectBindings(); len(dropped) != 0 {
 		t.Fatalf("dropped %v against a write-protected project", dropped)
@@ -771,7 +776,7 @@ func TestGoneAFailedPinClearKeepsTheBinding(t *testing.T) {
 	if dropped := DropGoneProjectBindings(); len(dropped) != 1 || dropped[0] != root {
 		t.Fatalf("retry dropped %v, want [%s]", dropped, root)
 	}
-	if _, ok := readProjectsTable(t).Bindings[root]; ok {
+	if _, ok := readProjectsTable(t)[root]; ok {
 		t.Fatal("row still there after a clean retry")
 	}
 	env := readLocalEnv(t, root)

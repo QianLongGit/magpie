@@ -59,21 +59,18 @@ func projectEnv(t *testing.T, root string) map[string]any {
 	return f.Env
 }
 
-// projectsTable 读 projects.json 的两个半边。
-func projectsTable(t *testing.T) (bindings, snapshots map[string]string) {
+// projectsTable 读 projects.json 的绑定表（map[root]agent.ProjectBinding）。
+func projectsTable(t *testing.T) map[string]agent.ProjectBinding {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "magpie", "projects.json"))
 	if err != nil {
 		t.Fatalf("projects.json unreadable: %v", err)
 	}
-	var f struct {
-		Bindings  map[string]string `json:"bindings"`
-		Snapshots map[string]string `json:"snapshots"`
-	}
-	if err := json.Unmarshal(b, &f); err != nil {
+	var m map[string]agent.ProjectBinding
+	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("projects.json unreadable: %v (%s)", err, b)
 	}
-	return f.Bindings, f.Snapshots
+	return m
 }
 
 func TestProjectBindPinsAProjectToAGroup(t *testing.T) {
@@ -89,7 +86,7 @@ func TestProjectBindPinsAProjectToAGroup(t *testing.T) {
 		t.Fatalf("bind output names no file path:\n%s", out)
 	}
 	m, err := agent.ProjectBindings()
-	if err != nil || m[root] != "group/proj-x" {
+	if err != nil || m[root].Group != "group/proj-x" {
 		t.Fatalf("bindings = %v (err %v), want %s -> group/proj-x", m, err, root)
 	}
 	env := projectEnv(t, root)
@@ -110,7 +107,7 @@ func TestProjectBindByGroupNameWorksToo(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, err := agent.ProjectBindings()
-	if err != nil || m[root] != "group/proj-x" {
+	if err != nil || m[root].Group != "group/proj-x" {
 		t.Fatalf("bind by name = %v (err %v)", m, err)
 	}
 }
@@ -125,7 +122,7 @@ func TestProjectBindNamesItsGitRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, err := agent.ProjectBindings()
-	if err != nil || m[root] != "group/proj-x" {
+	if err != nil || m[root].Group != "group/proj-x" {
 		t.Fatalf("bind by subdir keyed %v (err %v), want the git root %s", m, err, root)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".claude", "settings.local.json")); err != nil {
@@ -156,12 +153,9 @@ func TestProjectUnbindClearsBindingAndPins(t *testing.T) {
 	if !strings.Contains(out, "group/proj-x") {
 		t.Fatalf("unbind output names no group:\n%s", out)
 	}
-	bindings, snapshots := projectsTable(t)
+	bindings := projectsTable(t)
 	if _, ok := bindings[root]; ok {
 		t.Fatal("the binding row survived unbind")
-	}
-	if snapshots[root] == "" {
-		t.Fatal("the snapshot went with the row; the dual-map ruling keeps it as regret medicine")
 	}
 	env := projectEnv(t, root)
 	for _, k := range wantProjectPins {

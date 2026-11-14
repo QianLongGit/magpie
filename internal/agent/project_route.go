@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -75,19 +76,16 @@ func isASCIILetter(b byte) bool {
 
 // =====================================================================
 // 绑定表 projects.json（settings.Dir() 下，先例 library.json /
-// stash.json）：key 是 ProjectRoot 的规范化路径，value 是组的完整 ref
-// （group/<id>，与 usage 归因、pin 值同一口径）。
-//
-// 快照在另一半 map 里（root -> 写前 settings.local.json 原文），与绑定
-// 行解耦（决策日志 2026-11-14 终裁，对齐 fork 备份表 remove 后留存）：
-// 删绑定行保快照、Save 只写 bindings 半边、同项目 rebind 滚动覆盖；没
-// 有绑定行的快照（解绑后的后悔药）是已知可控形态。
+// stash.json）：key 是 ProjectRoot 的规范化路径，value 是一条绑定行
+// ProjectBinding——组 ref 与写前快照存在同一行里，删行即快照同生命周
+// 期消失（解绑/级联删行，快照随行走，不留孤儿）。
 // =====================================================================
 
-// projectFile 是 projects.json 的两个半边。
-type projectFile struct {
-	Bindings  map[string]string `json:"bindings"`
-	Snapshots map[string]string `json:"snapshots"`
+// ProjectBinding 是一条项目绑定：组的完整 ref（group/<id>，与 usage
+// 归因、pin 值同一口径）与写前 settings.local.json 原文的滚动快照。
+type ProjectBinding struct {
+	Group    string `json:"group"`
+	Snapshot string `json:"snapshot,omitempty"`
 }
 
 // projectsPath 是绑定表文件的位置。
@@ -97,55 +95,55 @@ func projectsPath() string {
 
 // ProjectBindings 读绑定表。读不出来的表是未知，不是空：空 map 会让悬
 // 空对账以为没有绑定而跳过清理（failed read = unknown）。
-func ProjectBindings() (map[string]string, error) {
+func ProjectBindings() (map[string]ProjectBinding, error) {
 	b, err := os.ReadFile(projectsPath())
 	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]string{}, nil
+		return map[string]ProjectBinding{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var f projectFile
-	if err := json.Unmarshal(b, &f); err != nil {
+	var m map[string]ProjectBinding
+	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, fmt.Errorf("%s: %w", projectsPath(), err)
 	}
-	if f.Bindings == nil {
-		f.Bindings = map[string]string{}
+	if m == nil {
+		m = map[string]ProjectBinding{}
 	}
-	return f.Bindings, nil
+	return m, nil
 }
 
-// SaveProjectBindings 写绑定半边，快照半边原样带走（删行保快照）。
-func SaveProjectBindings(m map[string]string) error {
-	return writeProjects(func(f *projectFile) { f.Bindings = m })
+// SaveProjectBindings 写整个绑定表（每行连同自己的快照）。
+func SaveProjectBindings(m map[string]ProjectBinding) error {
+	return writeProjects(func(old map[string]ProjectBinding) {
+		clear(old)
+		maps.Copy(old, m)
+	})
 }
 
-// writeProjects 改 projects.json 的一个半边后整体写回：文件不可解析时
-// 先 lastgood 旁存原文再按空表起步，绝不覆盖吞掉；写经 edit.WriteAtomic
-// （temp+rename，同字节不写）。
-func writeProjects(change func(*projectFile)) error {
+// writeProjects 改 projects.json 后整体写回：文件不可解析时先 lastgood
+// 旁存原文再按空表起步，绝不覆盖吞掉；写经 edit.WriteAtomic（temp+
+// rename，同字节不写）。
+func writeProjects(change func(map[string]ProjectBinding)) error {
 	p := projectsPath()
-	var f projectFile
+	var m map[string]ProjectBinding
 	if b, err := os.ReadFile(p); err == nil {
-		if err := json.Unmarshal(b, &f); err != nil {
-			if kerr := lastgood.KeepUnparsed(p, lastgood.Into[projectFile]); kerr != nil {
+		if err := json.Unmarshal(b, &m); err != nil {
+			if kerr := lastgood.KeepUnparsed(p, lastgood.Into[map[string]ProjectBinding]); kerr != nil {
 				return kerr
 			}
-			f = projectFile{}
+			m = nil
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	// 半边先立起来再交给 change：新表（文件缺失/损坏重建）的两个 map
-	// 都是 nil，往里赋值会 panic
-	if f.Bindings == nil {
-		f.Bindings = map[string]string{}
+	// 表先立起来再交给 change：新表（文件缺失/损坏重建）是 nil map，
+	// 往里赋值会 panic
+	if m == nil {
+		m = map[string]ProjectBinding{}
 	}
-	if f.Snapshots == nil {
-		f.Snapshots = map[string]string{}
-	}
-	change(&f)
-	out, err := json.MarshalIndent(f, "", "  ")
+	change(m)
+	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -178,21 +176,23 @@ func localSettingsPath(root string) string {
 }
 
 // WriteProjectPins 把 root 的 settings.local.json 的 env 钉在 ref 上：
-// 模型键全 = ref，窗口键 = 组的最小成员窗口。写前把原文滚动快照进
-// projects.json 的快照半边（每次写前、单份、rebind 覆盖；文件缺失不快
-// 照）。绑定表先行：行（没有先建）与快照落表后文件才写，文件写失败行
-// 还在，重跑 bind 即修复（fork write_failure_keeps_db_row）。
+// 模型键全 = ref，窗口键 = 组的最小成员窗口。写前把原文滚动快照进该
+// root 绑定行的 Snapshot（每次写前、单份、rebind 覆盖；文件缺失或空白
+// 不快照、行内旧值保留）。绑定表先行：行落表（没有先建）后文件才写，
+// 文件写失败行还在，重跑 bind 即修复（fork write_failure_keeps_db_row）。
 func WriteProjectPins(root, ref string) error {
 	p := localSettingsPath(root)
 	orig, err := os.ReadFile(p)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := writeProjects(func(f *projectFile) {
-		f.Bindings[root] = ref
+	if err := writeProjects(func(m map[string]ProjectBinding) {
+		b := m[root] // 行不存在时零值：Group 待设、Snapshot 待填
+		b.Group = ref
 		if len(bytes.TrimSpace(orig)) > 0 {
-			f.Snapshots[root] = string(orig)
+			b.Snapshot = string(orig)
 		}
+		m[root] = b
 	}); err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func validLocalJSON(b []byte) bool {
 }
 
 // rebuildLocalSettings 把损坏的 settings.local.json 重建为只含 pin 的
-// 最小结构（原文已在快照半边，可手工取回）。
+// 最小结构（原文已在该行的 Snapshot 里，可手工取回）。
 func rebuildLocalSettings(p string, kvs []edit.KV) error {
 	env := map[string]string{}
 	for _, kv := range kvs {
@@ -255,7 +255,8 @@ func rebuildLocalSettings(p string, kvs []edit.KV) error {
 // ClearProjectPins 拔掉 root 的全部 pin 键（模型 8 键 + 窗口键，整组一
 // 起清——残留半组 pin 让 tier 行为不一致，比不 pin 更糟）。文件缺失或
 // 本来一个 pin 键都没有时不动用户文件（幂等）；确有 pin 要拔时写前同
-// 样滚动快照进 projects.json 的快照半边（fork remove 写前快照同理）。
+// 样滚动快照进该行的 Snapshot（fork remove 写前快照同理）——行不存在
+// 则不建行（快照只随行存在，不落孤儿）。
 func ClearProjectPins(root string) error {
 	p := localSettingsPath(root)
 	has := false
@@ -269,7 +270,12 @@ func ClearProjectPins(root string) error {
 		return nil
 	}
 	if orig, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(orig)) > 0 {
-		if err := writeProjects(func(f *projectFile) { f.Snapshots[root] = string(orig) }); err != nil {
+		if err := writeProjects(func(m map[string]ProjectBinding) {
+			if b, ok := m[root]; ok {
+				b.Snapshot = string(orig)
+				m[root] = b
+			}
+		}); err != nil {
 			return err
 		}
 	}
@@ -318,11 +324,11 @@ func init() {
 }
 
 // DropGoneProjectBindings 清理悬空绑定：组不在共享模型清单（hidden/
-// disabled/删除/auto-off 都不在）的绑定，先清 pin、成功后才删绑定行。
-// 次序红线：清 pin 失败（权限/IO）→ 留行、记日志、待下次 fire 或
-// magpie projects 对账重试——先删行 + 清 pin 失败 = 死 pin 永久残留且
-// 按行驱动的对账看不见。快照按双 map 裁决保留（删行保快照）。返回的
-// dropped 只含清理成功者。
+// disabled/删除/auto-off 都不在）的绑定，先清 pin、成功后才删绑定行
+// （整条 ProjectBinding 删，快照随行走）。次序红线：清 pin 失败（权限/
+// IO）→ 留行（快照随行留）、记日志、待下次 fire 或 magpie projects 对
+// 账重试——先删行 + 清 pin 失败 = 死 pin 永久残留且按行驱动的对账看
+// 不见。返回的 dropped 只含清理成功者。
 func DropGoneProjectBindings() (dropped []string) {
 	m, err := ProjectBindings()
 	if err != nil {
@@ -342,15 +348,15 @@ func DropGoneProjectBindings() (dropped []string) {
 		return false
 	}
 	changed := false
-	keep := make(map[string]string, len(m))
-	for root, ref := range m {
-		if served(ref) {
-			keep[root] = ref
+	keep := make(map[string]ProjectBinding, len(m))
+	for root, b := range m {
+		if served(b.Group) {
+			keep[root] = b
 			continue
 		}
 		if err := ClearProjectPins(root); err != nil {
 			log.Printf("clearing pins of %s: %v (kept for the next try)", root, err)
-			keep[root] = ref
+			keep[root] = b
 			continue
 		}
 		changed = true
