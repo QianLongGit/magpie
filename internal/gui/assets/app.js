@@ -9766,7 +9766,8 @@ function drawEditor(p, presetID) {
         took.push(t("Base URL") + " (" + t(API_NAMES[api]) + ")");
       }
     }
-    if (c.key) { key.value = draft.key = c.key; countKeys(); took.push(t("API key")); }
+    // no key box when keys are Accounts: none taken unseen
+    if (c.key && key.isConnected) { key.value = draft.key = c.key; countKeys(); took.push(t("API key")); }
     if (curlModel && c.model) { curlModel(c.model); took.push(t("model {model}", { model: c.model })); }
     if (took.length) notes.push(env ? t("Filled in from the pasted text: {what}.", { what: took.join(" · ") }) : t("Filled in from the curl command: {what}.", { what: took.join(" · ") }));
     if (curlBase && !c.api) notes.push(t("Its URL isn't an address ending in /chat/completions, /messages or /responses: type the base URL."));
@@ -17890,7 +17891,8 @@ function panelQuotaCard(q, first = false) {
   // a pool's 5-hour and weekly rings, every pool's (a third pool once left
   // Claude's out: 01huadalang on Discord), else three
   const fam = familyWindows(q.windows.filter((w) => !w.unlimited && !quotaNoShare(w)));
-  const tx = q.windows.filter((w) => quotaNoShare(w)).map((w) => t(w.name) + " " + quotaText(w)).join(" · ");
+  const says = (f) => q.windows.filter(f).map((w) => t(w.name) + " " + quotaText(w)).join(" · ");
+  const tx = says(quotaNoShare), wallets = says((w) => w.balance != null);
   if (!fam.length && (tx || q.windows.some((w) => w.unlimited))) {
     card.append(pqLine(tx || t("Unlimited"), q));
     if (balance) card.append(balance);
@@ -17937,6 +17939,9 @@ function panelQuotaCard(q, first = false) {
     rings.append(r);
   }
   card.append(rings);
+  // a wallet beside the rings (Kimi Code's booster, "Extra usage"): what
+  // is left on it, not only on the Usage page (apple_test_src on X)
+  if (wallets) card.append(el("span", "pq-sub", wallets));
   if (balance) card.append(balance);
   // the first window's cycle, a thin line under the card (#651)
   const spark = ws[0] && !ws[0].tiers ? quotaSpark(q, ws[0]) : null;
@@ -19379,8 +19384,10 @@ const CURRENCIES = [["usd", "$ USD"], ["cny", "¥ CNY"], ["provider", "By provid
 // The text size is the windows' own zoom, as a browser's Ctrl/Cmd +: the
 // page is laid out again in larger CSS pixels, so everything it measures is
 // as at 100%, and magpie sizes the windows around it (textsize.go). None is
-// under 100%: WebView2 and WebKitGTK zoom no smaller through Wails.
-const TEXT_SIZES = [100, 110, 125, 150];
+// under 100%: WebView2 and WebKitGTK zoom no smaller through Wails. 115 and
+// 120 sit between 110 and 125, where 110 read small and 125 crowded on a 4K
+// screen at 200% (WeltAn_X on X).
+const TEXT_SIZES = [100, 110, 115, 120, 125, 150];
 const textSizeKeys = () => /^Mac/.test(navigator.platform) ? "⌘+ ⌘− ⌘0" : "Ctrl+ Ctrl− Ctrl+0";
 // --zoom is the text size for what is placed against the window's own
 // drawing, which does not grow with the page: the Mac's traffic lights.
@@ -20047,6 +20054,8 @@ function setUpdateMirror(mirror) {
   return writingPrefs(api("settings/update-mirror", { mirror }))
     .then((ns) => { prefs = ns; mirrorEditing = false; mirrorDraft = mirrorErr = ""; renderSettings(); status(t("Saved"), "ok", 1500); return ns; });
 }
+// Use a mirror… and Change open the field from mirroredit.js
+const editMirror = (r, s, v) => import("./mirroredit.js").then(() => { mirrorEditing = true; mirrorDraft = v; renderUpdateMirror(r, s); }, statusErr);
 function renderUpdateMirror(r, s) {
   r.classList.add("update-mirror-row");
   const who = r.querySelector(".who"), val = r.querySelector(".val");
@@ -20057,37 +20066,24 @@ function renderUpdateMirror(r, s) {
   const m = s.updateMirror || "";
   sub.textContent = mirrorErr || (m ? t("Updates are downloaded from usemagpie.ai, and through this mirror when that fails, each checked against usemagpie.ai's checksum")
     : t("Updates are downloaded from usemagpie.ai, and from GitHub when that fails; a mirror can stand in for GitHub where it is slow"));
+  // the docs' Mirrors page says which mirror and how (WeltAn_X on X)
+  const more = el("button", "sub-more", t("How mirrors work"));
+  more.onclick = () => api("open", { url: "https://usemagpie.ai/docs/" + ({ zh: "zh/", "zh-TW": "zh/", ja: "ja/" }[locale] || "") + "mirrors#settings" }).catch(() => {});
+  sub.append(" ", more);
   sub.classList.toggle("err", !!mirrorErr);
   sub.title = t("The update and its checksum always come from usemagpie.ai; a file from the mirror that doesn't match it is not installed.");
-  if (!mirrorEditing) {
-    if (m) {
-      const official = el("button", "text", t("Remove mirror"));
-      official.onclick = () => setUpdateMirror("").catch(statusTErr);
-      const change = el("button", "text", t("Change"));
-      change.onclick = () => { mirrorEditing = true; mirrorDraft = m; renderUpdateMirror(r, s); };
-      val.append(el("code", "", m), change, official);
-    } else {
-      const add = el("button", "text", t("Use a mirror…"));
-      add.onclick = () => { mirrorEditing = true; mirrorDraft = ""; renderUpdateMirror(r, s); };
-      val.append(el("code", "", "usemagpie.ai"), add);
-    }
-    return;
+  if (mirrorEditing) return mirrorEdit(r, s, sub, val);
+  if (m) {
+    const official = el("button", "text", t("Remove mirror"));
+    official.onclick = () => setUpdateMirror("").catch(statusTErr);
+    const change = el("button", "text", t("Change"));
+    change.onclick = () => editMirror(r, s, m);
+    val.append(el("code", "", m), change, official);
+  } else {
+    const add = el("button", "text", t("Use a mirror…"));
+    add.onclick = () => editMirror(r, s, "");
+    val.append(el("code", "", "usemagpie.ai"), add);
   }
-  const i = input(mirrorDraft, "https://mirror.example/");
-  i.className = "words update-mirror-input";
-  i.setAttribute("aria-label", t("Mirror address"));
-  i.oninput = () => { mirrorDraft = i.value; };
-  const save = el("button", "text", t("Save"));
-  save.onclick = () => {
-    const v = i.value.trim();
-    if (!v) return i.focus(NO_SCROLL);
-    setUpdateMirror(v).catch((e) => { mirrorErr = t(e.message); statusTErr(e); renderSettings(); });
-  };
-  const cancel = el("button", "text", t("Cancel"));
-  cancel.onclick = () => { mirrorEditing = false; mirrorDraft = mirrorErr = ""; renderUpdateMirror(r, s); };
-  i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") save.onclick(); else if (e.key === "Escape") cancel.onclick(); };
-  val.append(i, cancel, save);
-  queueMicrotask(() => { if (i.isConnected && document.activeElement !== i) i.focus(NO_SCROLL); });
 }
 
 function renderSettings() {

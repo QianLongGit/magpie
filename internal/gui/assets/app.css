@@ -1442,6 +1442,15 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 .us-hid .us-showall { align-self: flex-start; margin: 4px 0 0 2px; font-size: 11.5px; }
 .us-hid .us-showall[hidden] { display: none; }
 #quotaHid .row.stat .who { flex: 1 1 auto; min-width: 0; }
+/* the Agents list's small, idle clients, folded into one Other row */
+.row.stat.us-other { cursor: default; }
+.row.stat.us-other .us-other-chev { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; color: var(--muted); }
+.row.stat.us-other .us-other-chev svg { transition: transform .15s cubic-bezier(.23, 1, .32, 1); }
+.row.stat.us-other[aria-expanded="true"] .us-other-chev svg { transform: rotate(90deg); }
+.row.stat.us-other .who .name { color: var(--fg-2); }
+.us-folded { display: flex; flex-direction: column; margin-left: 12px; border-top: 1px solid var(--line-2); }
+.us-folded .us-folded-more { align-self: flex-start; margin: 4px 0 0 2px; font-size: 11.5px; }
+@media (prefers-reduced-motion: reduce) { .row.stat.us-other .us-other-chev svg { transition: none; } }
 /* the switched-off providers' check-ins (wxkwxk666 on X) */
 #quotaOff .row.stat .who { flex: 1 1 auto; min-width: 0; }
 #quotaOff .wb-checkin { margin-top: 3px; }
@@ -3246,6 +3255,8 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 #gatewayKeys .klf .klf-period, #gatewayKeys .klf .klf-pick { width: 100%; max-width: none; height: 28px; justify-content: space-between; color: var(--fg); }
 #gatewayKeys .klf.with-days { grid-template-columns: minmax(0, 1fr) minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1fr); }
 #gatewayKeys .klf-days[hidden] { display: none; }
+#gatewayKeys .klf-acct { grid-column: span 2; }
+#gatewayKeys .klf-acct[hidden] { display: none; }
 #gatewayKeys .klf-models { grid-column: 1 / -1; }
 #gatewayKeys .klf .klf-pick > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editor .headers.aliases .pair .alias-pick { flex: 6; max-width: none; min-width: 0; height: 27px; justify-content: space-between; }
@@ -4385,6 +4396,9 @@ input.words.remote-key { width: 160px; }
 .prefs .row.rule-editing .val.rule-add { flex-wrap: wrap; row-gap: 6px; }
 .prefs .row.rule-editing .rule-tail { display: flex; align-items: center; gap: 6px; flex: 1 1 240px; min-width: 0; }
 .row.pref .sub.err { color: var(--red); white-space: normal; }
+/* Download source's way to the docs' Mirrors page, quiet in its line */
+.row.pref .sub .sub-more { padding: 0; color: var(--fg-2); text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); text-underline-offset: 2px; cursor: pointer; transition: color .15s ease; }
+.row.pref .sub .sub-more:hover { color: var(--fg); }
 /* Warm up now's line holds a vendor's reason, which can be one long word */
 .row.warm-now .sub { white-space: normal; overflow-wrap: anywhere; }
 .warm-at { display: flex; align-items: center; gap: 8px; margin-left: auto; flex: none; }

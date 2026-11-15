@@ -3837,6 +3837,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// a compaction's summary is held to its end, for a cut or an
 		// error halfway to go to the next candidate (#2274)
 		hw.wantWhole = wantWhole && !pass
+		// a group member's reply that said nothing at all goes to the
+		// next member while one is left (emptyEnded, #6712); the last
+		// one's goes as it came
+		hw.emptyFails = isGroup && !last && !pass
 		// Claude's and GPT's reasoning is held for a refusal after it only
 		// while another candidate could answer instead: the last one's
 		// refusal isn't asked again, so holding it only kept a lone relay's
@@ -5793,6 +5797,13 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// back whole (gathers)
 	relayable := slices.Contains(s.usable(p, model), from) && (p.Account == nil || !p.Account.Stream || streamOf(body) || gathers(p, from, body))
 	relay := relayable
+	// a subagent's task its lead sealed (#1109) is lost by a translation,
+	// as a native compaction is (#1099): responsesParts reads an
+	// agent_message's text and images alone, so the sealed body would be
+	// dropped and the NEW_TASK header asked alone. Every downgrade below
+	// leaves a sealed task with who can open it, as it came, or the request
+	// fails saying so
+	sealed := from == provider.Responses && hasSealedAgentMessage(body)
 	// a Claude model is asked on Messages whatever API the client spoke,
 	// for the cache breakpoints the translation adds: OpenCode speaks Chat
 	// for every model, and a relay drops cache_control on Chat, so every
@@ -5813,7 +5824,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// apply_patch as a function, left web_search out and added
 	// max_output_tokens, the shape such a relay turns away (maralica on
 	// Discord). Its web_search goes to the relay as sent.
-	if relay && searchedForIt(r.Context(), p, from, model, body) && !(from == provider.Responses && (hasSealedAgentMessage(body) || codexAsSent(p, r.Header))) {
+	if relay && searchedForIt(r.Context(), p, from, model, body) && !(sealed || codexAsSent(p, r.Header)) {
 		relay, ownAPI = false, true
 	}
 	// Claude Code's advisor, which magpie runs for a model whose upstream
@@ -5891,7 +5902,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	if relay && !keep && streamOnly {
 		relay, ownAPI = false, true
 	}
-	if keep && relayable {
+	if (keep || sealed) && relayable {
 		relay, ownAPI = true, false
 	}
 	if relay {
@@ -5910,9 +5921,10 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		}
 		// the model isn't served on the client's own API: speak another;
 		// or it turned the custom tools away just now: speak it translated,
-		// except a compaction, which a translation would leave out
+		// except a compaction or a sealed subagent task, which a
+		// translation would leave out
 		if customOff() || !s.fits(p.ID, streamOnlyRefused(model), from) && !streamOf(body) {
-			if keep {
+			if keep || sealed {
 				return writeError(w, from, status, msg), msg
 			}
 			ownAPI = true
@@ -6945,7 +6957,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if err != nil {
 		return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 	}
-	if res.StatusCode == http.StatusBadRequest && (proto == provider.Chat || proto == provider.Gemini) && signaturesReach(p, proto, upstream) {
+	if res.StatusCode == http.StatusBadRequest && (proto == provider.Chat || proto == provider.Gemini) && (signaturesReach(p, proto, upstream) || proto == provider.Chat && bodyHasBytes(body, thoughtSignatureField)) {
 		// a signature Google won't take (signatureRefused), one given
 		// before magpie noted whose it was: asked again once without
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -6954,7 +6966,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if signatureRefused.Match(b) {
 			bare := geminiBodySignatures(body, p.ID, false)
 			if proto == provider.Chat {
-				bare = chatCallSignatures(body, true, p.ID, false)
+				bare = chatCallSignatures(body, geminiCompat(p.VendorHost(), upstream), p.ID, false)
 			}
 			if !bytes.Equal(bare, body) {
 				body = bare
@@ -6964,11 +6976,12 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			}
 		}
 	}
-	if (delta || proto == provider.Responses && prevHeld(r)) && (badRequest(res.StatusCode) || res.StatusCode == http.StatusNotFound) {
+	if (delta || proto == provider.Responses && (prevHeld(r) || prevClientWhole(r))) && (badRequest(res.StatusCode) || res.StatusCode == http.StatusNotFound) {
 		// one it no longer holds: the conversation whole; and one another
 		// of its resources made (prevForeign): the whole, with the items
-		// magpie brought back naming nothing. Asked again once, and only
-		// with a body that differs.
+		// magpie brought back naming nothing — or, for a conversation the
+		// client replayed whole itself, the ids it echoes taken out
+		// (#6320). Asked again once, and only with a body that differs.
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
 		res.Body = io.NopCloser(bytes.NewReader(b))
@@ -7434,7 +7447,12 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		whole = &chatWhole{names: chatToolNames(body)}
 	}
 	var sigs *sigTidy
-	if proto == provider.Chat && geminiCompat(p.VendorHost(), model) {
+	if proto == provider.Chat && (sse || whole != nil || geminiCompat(p.VendorHost(), model)) {
+		// a call a Chat upstream signed, Gemini's API or a relay serving
+		// Gemini under any host (Mamba_asr on X): its id carries the
+		// signature, which goes back to that upstream (chatCallSignatures).
+		// A reply that is neither a stream nor held whole already
+		// (chatWhole) isn't held for it, past Gemini's own
 		sigs = &sigTidy{sse: sse, by: p.ID}
 	} else if proto == provider.Gemini {
 		// a Gemini client keeps the signatures itself: noted as p's
@@ -8580,7 +8598,7 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 				continue
 			}
 		}
-		if res.StatusCode == http.StatusBadRequest && signaturesReach(p, to, model) && signatureRefused.Match(b) {
+		if res.StatusCode == http.StatusBadRequest && (signaturesReach(p, to, model) || to == provider.Chat && signsOwn(req, p.ID)) && signatureRefused.Match(b) {
 			// a signature Google won't take (a client changed it, or
 			// another provider gave it before magpie noted whose it was):
 			// the calls waved through instead, for this request
@@ -9664,6 +9682,11 @@ func buildFor(p provider.Provider, proto provider.Protocol, r *Request, model st
 		// of in words (#6135)
 		c := *r
 		c.videoOff = true
+		r = &c
+	}
+	if proto == provider.Chat && r.signer != p.ID {
+		c := *r
+		c.signer = p.ID
 		r = &c
 	}
 	return build(proto, r, model, buildHost(p), p.RejectsTemperature(model))
