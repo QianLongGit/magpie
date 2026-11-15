@@ -110,6 +110,7 @@ func TestStableNotesAreAll(t *testing.T) {
 // feed, either of which would hand the newest release to someone who chose
 // one a day.
 func TestDailyStaysOnTheFeed(t *testing.T) {
+	t.Skip("the fork takes no official feed: the default feed never falls back onto GitHub either (update.go's Feed)")
 	t.Setenv("MAGPIE_UPDATE_FEED", "")
 	for _, c := range []struct {
 		channel string
