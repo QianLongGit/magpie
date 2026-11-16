@@ -567,6 +567,9 @@ type Server struct {
 	// bodyCaps are the byte caps providers refused a request over
 	// (body_cap.go)
 	bodyCaps bodyCaps
+	// imageCaps are the image caps a model refused a request over, by
+	// provider id and model (image_cap.go)
+	imageCaps bodyCaps
 	// codexTurns is the model each Codex last had a turn of its own
 	// answered on, by caller (codexMemoryStandIn)
 	codexTurns sync.Map
@@ -598,6 +601,8 @@ type Server struct {
 	unread unreadConns
 	// sockets are the Responses WebSockets being served (responses_ws.go)
 	sockets clientSockets
+	// realtimes are the Realtime API sessions being served (realtime.go)
+	realtimes realtimeSessions
 	// what it serves other computers TLS with, nil without (tls.go)
 	tls *tlsServer
 	// the images described for models that can't see them (vision.go);
@@ -978,7 +983,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		// a socket's connection was taken from the server (hijacked), so
 		// Shutdown doesn't wait for it: each ends after its turn in flight
 		sockets := make(chan struct{})
-		go func() { defer close(sockets); s.sockets.drain(c) }()
+		// a realtime session has no turn to wait for: it is closed going
+		// away, and its client opens a new one
+		s.realtimes.end()
+		go func() { defer close(sockets); s.sockets.drain(c); s.realtimes.wait(c) }()
 		if err := srv.Shutdown(c); err != nil {
 			// the requests still answering are cut where they are, and
 			// an agent streaming one reads a reply broken off (Codex:
@@ -1024,7 +1032,7 @@ func (s *Server) Handler() http.Handler {
 	// on (dumpFirst)
 	// a socket's turns go through all of it again (socketEntry); the
 	// agent's Retry-After is bounded on the way out (retryCapped)
-	return socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(keyLimited(s.keySlots(mux, mux))))))))))))
+	return socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(keptBodyRequests(keyLimited(s.keySlots(mux, mux)))))))))))))
 }
 
 // routes are the client APIs, each by its pattern: readOnlyGuard reads
@@ -1149,6 +1157,8 @@ func (s *Server) routes() *routeMux {
 	// speech to text, for a client's voice input (#2053)
 	mux.HandleFunc("POST /v1/audio/transcriptions", s.transcribe("/audio/transcriptions", "transcriptions"))
 	mux.HandleFunc("POST /audio/transcriptions", s.transcribe("/audio/transcriptions", "transcriptions"))
+	mux.HandleFunc("GET /v1/realtime", s.realtime)
+	mux.HandleFunc("GET /realtime", s.realtime)
 	mux.HandleFunc("POST /v1/audio/translations", s.transcribe("/audio/translations", "translations"))
 	mux.HandleFunc("POST /audio/translations", s.transcribe("/audio/translations", "translations"))
 	mux.HandleFunc("POST /v1/audio/speech", s.speak)
@@ -1184,7 +1194,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "magpie serves /v1/chat/completions, /v1/responses, /v1/messages, /v1/systemone, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/embeddings, /v1/rerank, /v1/decisions, /v1/audio/transcriptions, /v1/audio/translations, /v1/audio/speech and /v1beta/models/*")
+		writeError(w, provider.Chat, http.StatusNotFound, "magpie serves /v1/chat/completions, /v1/responses, /v1/messages, /v1/systemone, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/embeddings, /v1/rerank, /v1/decisions, /v1/audio/transcriptions, /v1/audio/translations, /v1/audio/speech, /v1/realtime (WebSocket) and /v1beta/models/*")
 	})
 	return mux
 }
@@ -1213,7 +1223,7 @@ var catalogSize stamped[struct{}, int]
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"name": "magpie", "version": Version, "models": catalogSize.get(struct{}{}, func() int { return len(provider.Catalog()) }), "window": Window,
-		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/systemone", "/v1beta/models/{model}:generateContent", "/v1/images/generations", "/v1/images/edits", "/v1/videos", NativePath + "{provider}/{path}", "/v1/embeddings", "/v1/rerank", "/v1/decisions", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech", "/v1/magpie/quotas", "/v1/magpie/quotas/history", "/v1/magpie/usage", "/v1/magpie/usage/requests", "/v1/magpie/route", StatuslinePath, "/v1/magpie/trace", OwnMCPPath, SearchMCPPath, VisionMCPPath, MemoryMCPPath, SessionsMCPPath, ImageMCPPath, BrowserMCPPath, ToolsMCPPath, HubMCPAll, HubMCPPath + "{agent}"}}
+		"apis": []string{"/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/systemone", "/v1beta/models/{model}:generateContent", "/v1/images/generations", "/v1/images/edits", "/v1/videos", NativePath + "{provider}/{path}", "/v1/embeddings", "/v1/rerank", "/v1/decisions", "/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech", "/v1/realtime", "/v1/magpie/quotas", "/v1/magpie/quotas/history", "/v1/magpie/usage", "/v1/magpie/usage/requests", "/v1/magpie/route", StatuslinePath, "/v1/magpie/trace", OwnMCPPath, SearchMCPPath, VisionMCPPath, MemoryMCPPath, SessionsMCPPath, ImageMCPPath, BrowserMCPPath, ToolsMCPPath, HubMCPAll, HubMCPPath + "{agent}"}}
 	// which process serves, for another magpie on this computer to name it
 	// on its Routing page (#2606); not told to another machine
 	if local(r) {
@@ -2774,6 +2784,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		asked = m
 		move(m, movedDshCompactRested)
 	}
+	// the Codex app's prompt suggestions on the model set for them, not
+	// the one its server names, which falls back to the provider's
+	// default ("auto") on magpie; one the ChatGPT backend's route already
+	// put there is recorded as asked for the model it was
+	if was := suggestionsAskedOf(r); was != "" && was != call.Model {
+		to := call.Model
+		call.Model = was
+		move(to, movedCodexSuggestions)
+	} else if m := codexSuggestionsTo(r, agent, call.Kind, asked); m != "" {
+		asked = m
+		move(m, movedCodexSuggestions)
+	}
 	// a Codex subagent on the model set for Codex's subagents, whatever
 	// its lead asked for (willz on Discord), and a Claude Desktop
 	// subagent's tool turn on the one set for Desktop's; one already put
@@ -4096,19 +4118,21 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		if mapped != "" {
 			// "none" turns its reasoning off; another level is asked at
 			// the one its model has nearest, as a fixed member's is
+			efforts := c.p.Efforts(c.model)
 			if mapped != "none" {
-				mapped = fitLevel(mapped, c.p.Efforts(c.model))
+				mapped = fitLevel(mapped, efforts)
 			}
-			attemptBody = withModelEffort(from, attemptBody, c.model, mapped)
+			attemptBody = withModelEffort(from, attemptBody, c.model, mapped, efforts)
 		} else if ruled != "" {
 			// asked even of a request that asked for no reasoning, as a
 			// member fixed at an effort is; already fitted to its levels
-			attemptBody = withModelEffort(from, attemptBody, c.model, ruled)
+			attemptBody = withModelEffort(from, attemptBody, c.model, ruled, c.p.Efforts(c.model))
 		} else if fixed != "" {
 			// a member fixed at an effort is asked for it, at the level its
 			// model has nearest, whatever the agent asked or the turn's
 			// pick: even a request that asked for no reasoning
-			attemptBody = withModelEffort(from, attemptBody, c.model, fitLevel(fixed, c.p.Efforts(c.model)))
+			efforts := c.p.Efforts(c.model)
+			attemptBody = withModelEffort(from, attemptBody, c.model, fitLevel(fixed, efforts), efforts)
 		} else if effort != "" {
 			// the level this model has nearest to the one picked; one whose
 			// levels aren't known isn't asked for more than high, which
@@ -6122,6 +6146,11 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 		// oldest images left out, or said as a 413 (body_cap.go)
 		res, err = s.refitOverCap(ctx, p, to, path, body, in, res)
 	}
+	if err == nil && res.StatusCode >= 400 {
+		// more images than the model takes: asked again with its oldest
+		// left out (image_cap.go)
+		res, err = s.refitImageCap(ctx, p, to, path, body, in, res)
+	}
 	if err == nil && mantleRoutes(p, to) {
 		res, err = s.mantleReroute(ctx, p, to, path, body, in, res)
 	}
@@ -6198,6 +6227,8 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	body = kimiLockedSampling(p, to, body)
 	body = clinePin(p, to, body)
 	body = codexImagesFit(p, to, body)
+	// no more images than the model refused more over (image_cap.go)
+	body = s.withinImageCap(p, to, path, body)
 	// the tool turns' thinking a provider's model asked for before
 	// (thinking_back.go)
 	body = s.withThinkingBack(p, to, body)
@@ -6498,6 +6529,11 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		s.fitUserBetas(p, req.Header)
 	}
 	sent := len(body)
+	// to another magpie, against a body it kept before (remote_dict.go)
+	dict, dsent := sendDict(p, req, body)
+	if dict != nil {
+		sent = dsent
+	}
 	if p.Account != nil && p.Account.Agent == "codex" {
 		// a turn goes zstd-compressed, as Codex's own client sends it;
 		// sent plain, ChatGPT answered a 1.1 MB one 503 (ylorn on X)
@@ -6520,6 +6556,10 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	res, err := p.Do(s.client, req)
 	// what comes back is counted as it is read, as what went is (#4456)
 	res = gotDown(ctx, res)
+	if dict != nil {
+		// a body the other magpie couldn't decode goes again whole
+		res, err = dict.after(req, res, err, again)
+	}
 	if err == nil && res.StatusCode >= 400 && provider.OpenCodeURL(req.URL.String()) {
 		logOpenCodeRefusal(p, req, res.StatusCode)
 	}
@@ -7368,7 +7408,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if offEffort(e) {
 				s.markUnfit(p.ID, offRefused(model), proto)
 			}
-			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(withModelEffort(proto, body, model, onEffort(p, model))), r.Header); err != nil {
+			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(withModelEffort(proto, body, model, onEffort(p, model), p.Efforts(model))), r.Header); err != nil {
 				return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 			}
 		}
