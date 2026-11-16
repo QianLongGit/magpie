@@ -439,23 +439,6 @@ ok except gateway" stops being a normal run record.
   package.
 - Seen 1× (2026-10-14).
 
-**One full suite runs on a machine at a time.**
-- On 10-16 one session ran three suites at once (a 150m agent and
-  gateway run, a full ./... run and an agent-only run) beside others, at
-  load 300 to 400. Every full suite timed out, so no record said the
-  suite passed, and the Cursor mover's one-line min waited ~3h behind
-  them (#2557).
-- Done right from the evening on: a751f5282 and later commits ran
-  "through suite-lock", one suite per machine, and their records say ok.
-- 10-17: at 10:07 the box had three `go test ./...` runs, ~35 GUI
-  runners and over 100 browsers from several sessions, at load 313.
-  d4a1b9baa's GUI run was killed at its 30s bar, ebf3f48f7's shared Go
-  cache had files trimmed mid-run by another run, internal/agent took
-  50 to 58 minutes (#2544), and dccfefdf7's eight AppKit tests were
-  killed (#2645). The rule lives in this file only; a lock every suite
-  goes through would hold it.
-- Seen 2× (2026-10-16, 2026-10-17).
-
 **A quiet `go test ./...` log is not a hang until a package's own time
 says so.** go test prints packages in order, so one slow package holds
 back every line after it, and the log moves in bursts.
@@ -483,13 +466,33 @@ back every line after it, and the log moves in bursts.
   runs every GUI file that wheels the page (`reach`, `wheelTo`).
 - Seen 2× (2026-10-17, 2026-10-28).
 
+**A red only CI's OS shows is probed on CI's runners, with the
+suspect switched on and off, not rerun.** Start from what changed in
+that system's code the day before the red first came.
+- EBADF on plain file reads, writes and closes in internal/sessions was
+  red on macOS CI from 11-13 to 11-16 and filed twice (#6368, #6785).
+  mote and mica run macOS 27 and never showed it. The day before the
+  first red, 6f3e76626 had made the FSEvents stream with
+  kFSEventStreamCreateFlagWatchRoot. One probe run on macos-14, -15 and
+  -latest (#6795), with the flag on, off, on, off, gave 916 EBADF on and
+  0 off. 0522bf84f dropped the flag.
+- A system flag that watches more than it needs is a cost: WatchRoot's
+  one job (word of a root renamed) is an os.SameFile on the next Watch.
+- Seen 1× (2026-11-16).
+
 **Windows CI only compiles the tests, so a Windows-only red shows
 nowhere.** Run the package on the Windows box before calling a Windows
 failure "the same on main".
 - TestCursor was red on Windows for 3 days, from 585f7f7d until #1248.
 - 5d0c1dca's 16 and 76 Windows failures were called the same as main.
   Neither was filed. #923 is the open work to run more of the suite there.
-- Seen 1× (2026-10-08).
+- 11-16: filed is not owned. 023a56373 and c6a67dd41 each ran
+  internal/gui on the Windows box and shipped past 10 or 11 reds,
+  "red the same at origin/main" and open. #5928 had sat six days with
+  no comment; it was a one-line test fix (5bd13b802). Before naming a
+  Windows red as filed, read its issue: if nobody has it and the fix is
+  small, it is yours.
+- Seen 2× (2026-10-08, 2026-11-16).
 
 **What telemetry sends is an allow-list, and a change to what is sent
 re-derives every place that discloses it.**
@@ -916,6 +919,11 @@ cause:
     in 25ad34f42). Twice in three days: a change under site/public/docs
     ends with `node llms-full.mjs` and `node --test site/*.test.mjs`
     from the repo root, as test.yml runs it.
+    A third time 11-16: 9dcec6751 added the S3 archive cap to the docs
+    and ran neither generator. cli (linux/amd64) went red at 023a56373
+    on llms-full.txt and on public/search/*.json, the index b70c45048
+    added on 11-15 (fixed in f5f27070a). Docs pages now feed two
+    generated files: run `node search-index.mjs` too.
   - 10-28: of main's last 58 Test runs, 49 were cancelled by the next
     push. 0b99b8fbe's new allocation bound went red in macOS's Race job
     (sync.Pool lets go under -race) at 25df3187b, the first run after it
@@ -1120,6 +1128,10 @@ standards since 10-18, widened to a worktree and its logs. See
 
 ## Moved to the code standards
 
+- **One full suite runs on a machine at a time** (10-16, 10-17, 11-16).
+  On 11-16 64c426158 ran the GUI suite on mica beside another session's
+  full suite, was pushed with it still running, and named its 90 reds by
+  page, not by issue.
 - **A check that a value is gone looks past text magpie or the test
   made up** (10-10, 11-10, 11-15). On 11-15 TestMoreKinds checked that
   the user name "ops" was gone, and the made-up name for it, eight

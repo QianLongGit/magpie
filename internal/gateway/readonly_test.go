@@ -21,6 +21,8 @@ import (
 var readOnlyRefused = []string{
 	// the Library's skills and prompts: a held key is a display, not a client
 	"GET /v1/magpie/library",
+	// the models this computer's agents are on: a client's picks to follow
+	"GET /v1/magpie/agent-models",
 	// model lists and their Ollama spellings: what the key could use
 	"GET /v1/models", "GET /models", "GET /v1/models/{id...}", "GET /muse-code/models",
 	"GET /api/hello", "GET /api/version", "GET /api/tags",
@@ -61,7 +63,7 @@ var readOnlyRefused = []string{
 	// MCP servers, plugins' and Codex's backends, Gemini, everything else
 	"POST " + claudeMCPPath + "{token}", "/mcp/{name}", "/mcp/run/{name}",
 	SearchMCPPath, VisionMCPPath, ImageMCPPath, ImageMCPFiles + "{name}",
-	BrowserMCPPath, MemoryMCPPath, "GET " + BrowserExtensionPath, "GET " + BrowserStatusPath, ToolsMCPPath, ToolsMCPOne + "{plugin}",
+	BrowserMCPPath, MemoryMCPPath, SessionsMCPPath, "GET " + BrowserExtensionPath, "GET " + BrowserStatusPath, ToolsMCPPath, ToolsMCPOne + "{plugin}",
 	HubMCPPath + "{agent}", HubMCPAll, CodexPath + "/", "GET " + CodexCatalogPath,
 	"GET /v1beta/models", "POST /v1beta/models/{call...}", "/",
 }

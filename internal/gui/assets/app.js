@@ -1177,16 +1177,18 @@ function connectSaid(a) {
 // switched on, Codex kept its last pick, Claude Code started on a Sonnet
 // through magpie and Antigravity on some model, with nothing to say why).
 // c is agent.Connection: how the model was chosen.
+const CONN_WAS = "{agent} is connected to magpie · on {model} through magpie, the model it was on";
 const CONNECTED_HOW = {
   again: "{agent} is connected to magpie · back on {model}, what it was on when it was switched off",
-  same: "{agent} is connected to magpie · on {model} through magpie, the model it was on",
-  alike: "{agent} is connected to magpie · on {model} through magpie, the model it was on",
+  same: CONN_WAS,
+  alike: CONN_WAS,
   default: "{agent} is connected to magpie · on {model} through magpie: it had no model set, so the first of its own",
   first: "{agent} is connected to magpie · on {model} through magpie: magpie doesn't serve the model it was on",
+  remote: "{agent} is connected to magpie · on {model}, as on the remote magpie",
 };
 function connectedSaid(a, c) {
   const plain = t("{agent} is connected to magpie", { agent: a.name });
-  if (a.native && c?.how === "joined") return t("{agent} is connected to magpie", { agent: a.name });
+  if (a.native && c?.how === "joined") return plain;
   if (c?.how === "joined") return t("{agent} is connected to magpie · it stays on its own last pick; magpie's models join its {cmd}", { agent: a.name, cmd: PICKS_IN[kindOf(a)] || "/model" });
   const now = state.agents.find((x) => x.id === a.id);
   const f = now && startField(now);
@@ -6510,12 +6512,18 @@ function renderMovable() {
   const ids = ps.map((p) => p.id).join(",");
   const unmoved = providers.unmoved || [], wd = providers.withdrawn || [];
   const noSubs = !!(state?.settings?.noAccountDiscovery || prefs?.noAccountsEnv);
-  box.hidden = (!ps.length || hid === ids) && !unmoved.length && !wd.length && !noSubs;
+  // the line moving Antigravity's accounts to agy is in agymove.js,
+  // imported when there are any (@tongzhenbao on X); while it is drawn it
+  // says what the withdrawn plugin's line would, with the Move itself
+  const agy = providers.agyMove?.length && (window.agyMoveLine ? agyMoveLine() : void import("./agymove.js").then(renderMovable, () => {}));
+  box.hidden = (!ps.length || hid === ids) && !unmoved.length && !wd.length && !noSubs && !agy;
   if (noSubs) box.append(discoveryOffLine());
   for (const p of unmoved) box.append(unmovedLine(p));
+  if (agy) box.append(agy);
   // a plugin magpie gives nobody new (plugin.WithdrawnOf): it still
   // works, and its user is told the risk and what to use instead
   for (const w of wd) {
+    if (agy && w.id === "antigravity") continue;
     const go = el("button", "text action", t("Use {name}", { name: w.instead }));
     go.onclick = () => openPlugins("agy");
     box.append(depLine("withdrawn", t("{name}'s plugin can get your account suspended", { name: w.name }), t("Google suspends accounts it sees used outside its own app. {name} runs your own agy instead.", { name: w.instead }), go));
@@ -7103,11 +7111,12 @@ function renderArchive() {
   }
   b.classList.toggle("on", !!a.on);
   b.querySelector(".lib-switch").classList.toggle("on", !!a.on);
-  b.setAttribute("aria-checked", a.on ? "true" : "false");
+  b.setAttribute("aria-checked", !!a.on);
   b.disabled = archiveSaving;
   b.querySelector(".led-arch-name").textContent = t("Request archive");
-  b.title = a.bucket ? t("Keeps each call’s headers and bodies, secrets taken out, in {where}", { where: a.bucket })
-    : t("Keeps each call’s headers and bodies, secrets taken out, on this computer in {where}, the oldest removed past {size}", { where: a.folder || "", size: fmtBytes(a.cap || 0) });
+  const o = { where: a.bucket || a.folder, size: fmtBytes(a.cap) };
+  b.title = a.bucket ? t("Keeps each call’s headers and bodies, secrets taken out, in {where}, up to {size}", o)
+    : t("Keeps each call’s headers and bodies, secrets taken out, on this computer in {where}, the oldest removed past {size}", o);
   let err = box.querySelector(".led-arch-err");
   if (a.on && a.error) {
     if (!err) { err = el("span", "led-arch-err"); box.prepend(err); }
@@ -17177,8 +17186,11 @@ function planTerm(q) {
   return t(q.renew === "auto" ? "Renews {date}" : q.renew === "off" ? "Expires {date}" : "Until {date}", { date });
 }
 // planName: a plan id as the vendor's own app names it (visamzh on X:
-// ChatGPT's self_serve_business_prolite is its Business)
-const PLAN_NAMES = { self_serve_business_prolite: "Business", self_serve_business_usage_based: "Business", free_workspace: "Free", ent26: "Enterprise", prolite: "Pro Lite", promax: "Pro Max", edu_plus: "Edu Plus", edu_pro: "Edu Pro" };
+// ChatGPT's self_serve_business_prolite is its Business). ChatGPT's app
+// names its Pro plans by price: prolite Pro 100, promax Pro 500
+// (shangyuan0818 on X: "Pro Lite" is no plan it sells). Its plain pro
+// stays Pro, as Claude's and Grok's pro share the id
+const PLAN_NAMES = { self_serve_business_prolite: "Business", self_serve_business_usage_based: "Business", free_workspace: "Free", ent26: "Enterprise", prolite: "Pro 100", promax: "Pro 500", edu_plus: "Edu Plus", edu_pro: "Edu Pro" };
 const planName = (p) => p && (PLAN_NAMES[p] || (/^enterprise_cbp_/.test(p) ? "Enterprise" : p));
 const planChip = (s) => Object.assign(el("span", "plan", s), { title: s });
 function planSpan(q) {
@@ -23327,6 +23339,8 @@ const navList = (k) => { try { return JSON.parse(localStorage.getItem("magpie.na
 const navMine = () => navList("Hidden");
 function navHides() {
   if (mode !== "window") return;
+  // the reader's own order (navorder.js), imported only once there is one
+  window.navArrange ? navArrange() : navList("Order").length && import("./navorder.js").then(navHides, () => {});
   for (const b of $("#nav").querySelectorAll("button[data-view]")) b.hidden = (gatewayMode && GATEWAY_HIDES.includes(b.dataset.view)) || featureHides(b) || navMine().includes(b.dataset.view);
 }
 function applyFeatures(list) {
