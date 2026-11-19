@@ -21690,8 +21690,15 @@ function renderImages(s, keep) {
   // and redraws are synchronous (as videogen's row): a redraw that left
   // the rows for the import's callback would move the page under the
   // pointer (settings-hints' hover card)
-  const imageRows = () => { window.renderImageGen(s, keep, box); window.renderVisionRoute(s, keep, box); mcpRows(s, box); };
-  if (window.renderImageGen) imageRows();
+  // fork: the wait is on the Vision route row, which only imagerows.js
+  // draws. It used to wait on renderImageGen, but upstream moved that
+  // function back into this file (a top-level script's function lands on
+  // window), so the test was always true and imagerows.js was never
+  // loaded — the Vision route row then had nothing to draw it. The
+  // Image generation row is drawn by the local function above, as upstream
+  // does.
+  const imageRows = () => { renderImageGen(s, keep, box); window.renderVisionRoute(s, keep, box); mcpRows(s, box); };
+  if (window.renderVisionRoute) imageRows();
   else import("./imagerows.js").then(imageRows, statusErr);
 }
 
